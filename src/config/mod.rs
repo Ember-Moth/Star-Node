@@ -21,18 +21,26 @@ pub use pem::convert_cert_paths;
 pub use types::*;
 pub use validate::{ValidatedConfigs, create_server_configs};
 
+use std::path::Path;
+
 /// Loads configuration files from the provided paths.
 ///
 /// Reads each file, parses it as YAML, and returns the combined list of configs.
-pub async fn load_configs(args: &Vec<String>) -> std::io::Result<Vec<Config>> {
+pub async fn load_configs<I, P>(paths: I) -> std::io::Result<Vec<Config>>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     let mut all_configs = vec![];
-    for config_filename in args {
-        let config_bytes = match tokio::fs::read(config_filename).await {
+    for config_path in paths {
+        let config_path = config_path.as_ref();
+        let config_display = config_path.display();
+        let config_bytes = match tokio::fs::read(config_path).await {
             Ok(b) => b,
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Could not read config file {config_filename}: {e}"),
+                    format!("Could not read config file {config_display}: {e}"),
                 ));
             }
         };
@@ -42,7 +50,7 @@ pub async fn load_configs(args: &Vec<String>) -> std::io::Result<Vec<Config>> {
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Could not parse config file {config_filename} as UTF8: {e}"),
+                    format!("Could not parse config file {config_display} as UTF8: {e}"),
                 ));
             }
         };
@@ -52,7 +60,7 @@ pub async fn load_configs(args: &Vec<String>) -> std::io::Result<Vec<Config>> {
             Err(e) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Could not parse config file {config_filename} as config YAML: {e}"),
+                    format!("Could not parse config file {config_display} as config YAML: {e}"),
                 ));
             }
         };

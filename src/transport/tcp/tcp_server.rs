@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+#[cfg(target_family = "unix")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -463,6 +464,7 @@ async fn start_tcp_servers(
             }
             #[cfg(not(target_family = "unix"))]
             {
+                let _ = path_buf;
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Unix sockets are not supported on this platform",

@@ -1,6 +1,6 @@
 # shoes
 
-shoes is a high-performance multi-protocol proxy server written in Rust.
+shoes is a high-performance multi-protocol proxy data plane library written in Rust.
 
 ## Supported Protocols
 
@@ -41,58 +41,35 @@ All server protocols plus:
 - **Rule-based routing**: Route by IP/CIDR or hostname masks
 - **Named PEM certificates**: Define once, reference everywhere
 - **TLS fingerprint authentication**: Certificate pinning for TLS/QUIC
-- **Hot reloading**: Apply config changes without restart
+- **Embeddable lifecycle**: Start, stop, and reload listeners from a control plane
 - **Unix socket support**: Bind to Unix domain sockets
 
 For advanced access control (IP allowlist/blocklists), see [tobaru](https://github.com/cfal/tobaru).
 
-## Installation
+## Library Usage
 
-Precompiled binaries for x86_64 and Apple aarch64 are available on [Github Releases](https://github.com/cfal/shoes/releases).
+Embed `shoes` in a control-plane service that owns the Tokio runtime, pulls
+configuration, manages users, and reports usage. The data plane accepts typed
+configs and manages only proxy listeners.
 
-Or install with cargo:
+```rust
+use shoes::{DataPlane, DataPlaneOptions};
 
-```bash
-cargo install shoes
-```
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let configs = shoes::config::load_configs(["config.yaml"]).await?;
+    let (configs, _) = shoes::config::convert_cert_paths(configs).await?;
 
-## Usage
+    let mut data_plane =
+        DataPlane::start_with_options(configs, DataPlaneOptions::with_num_threads(4)).await?;
 
-```
-shoes [OPTIONS] <config.yaml> [config.yaml...]
+    // Later, after the control plane pulls a new config set:
+    // data_plane.reload(new_configs).await?;
 
-OPTIONS:
-    -t, --threads NUM    Set the number of worker threads (default: CPU count)
-    -d, --dry-run        Parse the config and exit
-    --no-reload          Disable automatic config reloading on file changes
-
-COMMANDS:
-    generate-reality-keypair                  Generate a new Reality X25519 keypair
-    generate-shadowsocks-2022-password <cipher>    Generate a Shadowsocks password
-```
-
-### Examples
-```bash
-# Run with a single config file
-shoes config.yaml
-
-# Run with multiple config files
-shoes server1.yaml server2.yaml rules.yaml
-
-# Run with custom thread count
-shoes --threads 8 config.yaml
-
-# Validate configuration without starting
-shoes --dry-run config.yaml
-
-# Run without hot-reloading
-shoes --no-reload config.yaml
-
-# Generate Reality keypair
-shoes generate-reality-keypair
-
-# Generate Shadowsocks 2022 cipher password
-shoes generate-shadowsocks-2022-password 2022-blake3-aes-256-gcm
+    tokio::signal::ctrl_c().await?;
+    data_plane.shutdown().await;
+    Ok(())
+}
 ```
 
 ## Configuration

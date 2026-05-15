@@ -1,12 +1,10 @@
-// This library shares code with the shoes binary. Server-side code appears "unused"
-// in lib builds but is used by the binary for server mode.
-// The client/server code is intermingled within modules - a proper fix would require
-// splitting into separate client/server modules or using feature flags.
+// The public API is intentionally small; protocol branches are reached through
+// config-driven dispatch from the data plane.
 #![allow(dead_code)]
 
-//! shoes - A high-performance multi-protocol proxy server.
+//! shoes - A high-performance multi-protocol proxy data plane.
 //!
-//! This library provides the core functionality for shoes.
+//! This library provides embeddable proxy listener lifecycle management.
 //!
 //! # Features
 //!
@@ -18,10 +16,10 @@
 //!
 //! - Linux (x86_64, aarch64)
 
-// Modules are declared here (mirroring main.rs) so the library crate can share
-// implementation with the binary.
+// Internal modules are kept private and exposed through the data plane API.
 mod client;
 mod crypto;
+pub mod dataplane;
 pub mod dns;
 mod io;
 mod mux;
@@ -69,6 +67,10 @@ pub(crate) use support::uuid_util;
 pub(crate) use transport::quic::server as quic_server;
 pub(crate) use transport::quic::stream as quic_stream;
 pub(crate) use transport::{shadow_tls, tcp, uot, websocket};
+
+pub use dataplane::{
+    DataPlane, DataPlaneOptions, configure_worker_threads, validate_configs, worker_threads,
+};
 
 /// Configuration types.
 pub mod config;

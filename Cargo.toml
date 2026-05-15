@@ -3,20 +3,13 @@ name = "shoes"
 version = "0.2.8"
 edition = "2024"
 license = "MIT"
-description = "A multi-protocol proxy server."
-homepage = "https://github.com/cfal/shoes/"
-repository = "https://github.com/cfal/shoes/"
+description = "A multi-protocol proxy dataplane library."
 readme = "README.md"
-keywords = ["proxy", "proxy-server", "shadowsocks", "v2ray", "vmess"]
-categories = ["command-line-utilities", "network-programming"]
+categories = ["network-programming"]
 
 [lib]
 name = "shoes"
 crate-type = ["rlib"]
-
-[[bin]]
-name = "shoes"
-path = "src/main.rs"
 
 [workspace]
 
@@ -52,7 +45,6 @@ lru = "*"
 md-5 = "*"
 memchr = "*"
 mime_guess = "*"
-notify = "*"
 parking_lot = "*"
 percent-encoding = "*"
 quinn = { version = "*", default-features = false, features = ["log", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs"] }
@@ -87,10 +79,6 @@ rustls-pemfile = "*"
 serde_json = "*"
 tempfile = "*"
 tokio-rustls = "*"
-
-# jemalloc for better memory performance (not supported on Windows MSVC or iOS)
-[target.'cfg(not(any(target_env = "msvc", target_os = "ios")))'.dependencies]
-tikv-jemallocator = "*"
 
 [profile.release]
 opt-level = 3

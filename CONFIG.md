@@ -12,7 +12,6 @@ shoes uses YAML configuration files. Multiple configuration types can be combine
 - [Named Groups](#named-groups)
 - [Named PEMs](#named-pems)
 - [Advanced Features](#advanced-features)
-- [Command Line](#command-line)
 
 ## Configuration Structure
 
@@ -715,9 +714,10 @@ client_chain:
           user_id: "uuid"
 ```
 
-### Hot Reloading
+### Reloading
 
-Configuration changes are automatically detected and applied without restarting. Disable with `--no-reload` flag.
+The library does not watch files or own process lifecycle. Embedding control
+planes can apply a new configuration set by calling `DataPlane::reload`.
 
 ### mTLS (Mutual TLS)
 
@@ -745,34 +745,9 @@ client_chain:
     protocol: ...
 ```
 
-## Command Line
-
-```bash
-shoes [OPTIONS] <config.yaml> [config.yaml...]
-
-OPTIONS:
-  -t, --threads NUM    Worker threads (default: CPU count)
-  -d, --dry-run        Parse config and exit
-  --no-reload          Disable hot-reloading
-
-COMMANDS:
-  generate-reality-keypair                       Generate Reality X25519 keypair
-  generate-shadowsocks-2022-password <cipher>    Generate Shadowsocks 2022 password
-```
-
 ## Tips
 
 ### Generate Keys
-
-**Reality keypair:**
-```bash
-shoes generate-reality-keypair
-```
-
-**Shadowsocks 2022 password:**
-```bash
-shoes generate-shadowsocks-2022-password 2022-blake3-aes-256-gcm
-```
 
 **UUID:**
 ```bash
@@ -806,4 +781,4 @@ openssl x509 -in cert.pem -noout -fingerprint -sha256
 - **"Permission denied"**: Ports < 1024 require root/admin
 - **Reality connection fails**: Verify keys match, UUID matches, SNI matches server's reality_targets key
 - **Vision not working**: Ensure inner protocol is VLESS
-- **Config validation fails**: Run with `--dry-run` for detailed errors
+- **Config validation fails**: Call `shoes::validate_configs` before starting listeners
