@@ -42,6 +42,7 @@ impl TcpServerHandler for PortForwardServerHandler {
         Ok(TcpServerSetupResult::TcpForward {
             remote_location: location.clone(),
             stream: server_stream,
+            authenticated_user: None,
             need_initial_flush: true,
             connection_success_response: None,
             initial_remote_data: None,

@@ -1630,6 +1630,7 @@ mod tests {
             tokio::fs::write(&path, content).await.unwrap();
         }
 
+        let cert_dir_str = cert_dir.to_string_lossy().replace('\\', "/");
         let config_yaml = format!(
             r#"
 - address: "0.0.0.0:443"
@@ -1677,17 +1678,17 @@ mod tests {
             protocol:
               type: http
 "#,
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display(),
-            cert_dir.display()
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str,
+            cert_dir_str
         );
 
         let configs: Vec<Config> = serde_yaml::from_str(&config_yaml).unwrap();

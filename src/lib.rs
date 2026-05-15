@@ -1,22 +1,22 @@
-// The public API is intentionally small; protocol branches are reached through
-// config-driven dispatch from the data plane.
+// 公共 API 刻意保持小而稳定；具体协议分支由数据面的配置驱动分发进入。
 #![allow(dead_code)]
 
-//! shoes - A high-performance multi-protocol proxy data plane.
+//! shoes - 高性能多协议代理数据面。
 //!
-//! This library provides embeddable proxy listener lifecycle management.
+//! 本库提供可嵌入的代理监听器生命周期管理。
 //!
-//! # Features
+//! # 特性
 //!
-//! - **Multi-protocol support**: VLESS, VMess, Trojan, Shadowsocks, and more
-//! - **Proxy chaining**: Connect through multiple proxies
-//! - **Flexible routing**: Rule-based traffic routing
+//! - **多协议支持**：VLESS、VMess、Trojan、Shadowsocks 等
+//! - **代理链**：通过多个上游代理连接
+//! - **灵活路由**：基于规则的流量路由
 //!
-//! # Platform Support
+//! # 平台支持
 //!
 //! - Linux (x86_64, aarch64)
 
-// Internal modules are kept private and exposed through the data plane API.
+// 内部模块默认保持私有，通过数据面 API 统一暴露。
+pub mod account;
 mod client;
 mod crypto;
 pub mod dataplane;
@@ -28,7 +28,9 @@ mod proxy;
 mod routing;
 mod runtime;
 mod security;
+pub mod session;
 mod support;
+pub mod telemetry;
 mod transport;
 
 pub(crate) use client::proxy_chain as client_proxy_chain;
@@ -69,11 +71,12 @@ pub(crate) use transport::quic::stream as quic_stream;
 pub(crate) use transport::{shadow_tls, tcp, uot, websocket};
 
 pub use dataplane::{
-    DataPlane, DataPlaneOptions, configure_worker_threads, validate_configs, worker_threads,
+    DataPlane, DataPlaneOptions, DataPlaneRuntime, configure_worker_threads, validate_configs,
+    worker_threads,
 };
 
-/// Configuration types.
+/// 配置类型。
 pub mod config;
 
-/// Multi-output logging infrastructure.
+/// 多输出日志基础设施。
 pub mod logging;

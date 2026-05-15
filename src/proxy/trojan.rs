@@ -192,6 +192,7 @@ impl TcpServerHandler for TrojanTcpHandler {
         Ok(TcpServerSetupResult::TcpForward {
             remote_location,
             stream: server_stream,
+            authenticated_user: None,
             need_initial_flush: false,
             connection_success_response: None,
             initial_remote_data: stream_reader.unparsed_data_owned(),

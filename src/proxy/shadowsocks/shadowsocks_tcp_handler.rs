@@ -226,6 +226,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
 
                 return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                     stream: Box::new(uot_stream),
+                    authenticated_user: None,
                     need_initial_flush: false,
                     proxy_selector: self
                         .proxy_selector
@@ -256,6 +257,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
                     return Ok(TcpServerSetupResult::BidirectionalUdp {
                         remote_location: destination,
                         stream: Box::new(uot_v2_stream),
+                        authenticated_user: None,
                         need_initial_flush: false,
                         proxy_selector: self
                             .proxy_selector
@@ -276,6 +278,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
 
                     return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                         stream: Box::new(uot_stream),
+                        authenticated_user: None,
                         need_initial_flush: false,
                         proxy_selector: self
                             .proxy_selector
@@ -289,6 +292,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
         Ok(TcpServerSetupResult::TcpForward {
             remote_location,
             stream: Box::new(server_stream),
+            authenticated_user: None,
             // Lets the IV be written when data actually arrives rather than flushing here.
             need_initial_flush: false,
             connection_success_response: None,

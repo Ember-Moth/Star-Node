@@ -63,7 +63,7 @@ async fn main() -> std::io::Result<()> {
     let mut data_plane =
         DataPlane::start_with_options(configs, DataPlaneOptions::with_num_threads(4)).await?;
 
-    // Later, after the control plane pulls a new config set:
+    // 控制面拉取到新的配置集后，可以按需重载：
     // data_plane.reload(new_configs).await?;
 
     tokio::signal::ctrl_c().await?;
@@ -75,6 +75,9 @@ async fn main() -> std::io::Result<()> {
 ## Configuration
 
 See [CONFIG.md](./CONFIG.md) for the complete YAML configuration reference.
+
+For dynamic users, per-user limits, traffic accounting, and control-plane
+integration, see [Data Plane Users](./docs/DATAPLANE_USERS.md).
 
 ## Examples
 

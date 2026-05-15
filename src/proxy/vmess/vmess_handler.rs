@@ -20,9 +20,11 @@ use super::fnv1a::Fnv1aHasher;
 use super::md5::{compute_md5, create_chacha_key};
 use super::nonce::{SingleUseNonce, VmessNonceSequence};
 use super::vmess_stream::{ReadHeaderInfo, VmessStream};
+use crate::account::{AuthenticatedUser, ProtocolKind};
 use crate::address::{Address, NetLocation, ResolvedLocation};
 use crate::async_stream::{AsyncMessageStream, AsyncStream};
 use crate::client_proxy_selector::ClientProxySelector;
+use crate::dataplane::DataPlaneRuntime;
 use crate::h2mux::{MUX_DESTINATION_HOST, MUX_DESTINATION_PORT, handle_h2mux_session};
 use crate::resolver::Resolver;
 use crate::stream_reader::StreamReader;
@@ -69,6 +71,7 @@ pub struct VmessTcpServerHandler {
     udp_enabled: bool,
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
 }
 
 impl std::fmt::Debug for VmessTcpServerHandler {
@@ -87,14 +90,10 @@ impl VmessTcpServerHandler {
         udp_enabled: bool,
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
+        runtime: DataPlaneRuntime,
     ) -> Self {
-        let mut user_id_bytes = parse_uuid(user_id).unwrap();
-        user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
-        let instruction_key: [u8; 16] = compute_md5(&user_id_bytes);
-
-        let derived_key = super::sha2::kdf(&instruction_key, &[b"AES Auth ID Encryption"]);
-        let unbound_key = UnboundCipherKey::new(&AES_128, &derived_key[0..16]).unwrap();
-        let aead_decrypting_key = CipherDecryptingKey::ecb(unbound_key).unwrap();
+        let instruction_key = derive_vmess_instruction_key(user_id).unwrap();
+        let aead_decrypting_key = create_vmess_aead_decrypting_key(&instruction_key).unwrap();
 
         Self {
             data_cipher: cipher_name.into(),
@@ -103,8 +102,113 @@ impl VmessTcpServerHandler {
             udp_enabled,
             proxy_selector,
             resolver,
+            runtime,
         }
     }
+
+    fn authenticate_cert_hash(&self, cert_hash: &[u8; 16]) -> std::io::Result<VmessServerAuth> {
+        let snapshot = self.runtime.user_registry().snapshot();
+        let has_dynamic_credentials = snapshot.has_protocol_credentials(ProtocolKind::Vmess);
+        let dynamic_credentials = snapshot.credentials_for_protocol(ProtocolKind::Vmess);
+
+        if !has_dynamic_credentials {
+            verify_vmess_auth_id(&self.aead_decrypting_key, cert_hash)?;
+            return Ok(VmessServerAuth {
+                instruction_key: self.instruction_key,
+                authenticated_user: None,
+            });
+        }
+
+        if dynamic_credentials.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "VMess user is disabled",
+            ));
+        }
+
+        for (uuid, authenticated_user) in dynamic_credentials {
+            let instruction_key = derive_vmess_instruction_key(&uuid)?;
+            let decrypting_key = create_vmess_aead_decrypting_key(&instruction_key)?;
+            if verify_vmess_auth_id(&decrypting_key, cert_hash).is_ok() {
+                return Ok(VmessServerAuth {
+                    instruction_key,
+                    authenticated_user: Some(authenticated_user),
+                });
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "VMess dynamic user authentication failed",
+        ))
+    }
+}
+
+struct VmessServerAuth {
+    instruction_key: [u8; 16],
+    authenticated_user: Option<AuthenticatedUser>,
+}
+
+fn derive_vmess_instruction_key(user_id: &str) -> std::io::Result<[u8; 16]> {
+    let mut user_id_bytes = parse_uuid(user_id)?;
+    user_id_bytes.extend(b"c48619fe-8f02-49e0-b9e9-edf763e17e21");
+    Ok(compute_md5(&user_id_bytes))
+}
+
+fn create_vmess_aead_decrypting_key(
+    instruction_key: &[u8; 16],
+) -> std::io::Result<CipherDecryptingKey> {
+    let derived_key = super::sha2::kdf(instruction_key, &[b"AES Auth ID Encryption"]);
+    let unbound_key = UnboundCipherKey::new(&AES_128, &derived_key[0..16]).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "failed to create VMess auth decrypting key",
+        )
+    })?;
+    CipherDecryptingKey::ecb(unbound_key).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "failed to create VMess auth decrypting key",
+        )
+    })
+}
+
+fn verify_vmess_auth_id(
+    aead_decrypting_key: &CipherDecryptingKey,
+    cert_hash: &[u8; 16],
+) -> std::io::Result<()> {
+    let mut aead_bytes = [0u8; 16];
+    aead_bytes.copy_from_slice(cert_hash);
+
+    aead_decrypting_key
+        .decrypt(&mut aead_bytes, DecryptionContext::None)
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "AEAD auth ID decryption failed",
+            )
+        })?;
+    let checksum = super::crc32::crc32c(&aead_bytes[0..12]);
+    let expected_checksum = u32::from_be_bytes(aead_bytes[12..16].try_into().unwrap());
+
+    if checksum != expected_checksum {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "AEAD authentication failed: checksum mismatch",
+        ));
+    }
+
+    let time_secs = u64::from_be_bytes(aead_bytes[0..8].try_into().unwrap());
+    let current_time_secs = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs();
+    let time_delta = time_secs.abs_diff(current_time_secs);
+    if time_delta > 120 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Hash timestamp is too old ({time_secs} is {time_delta} seconds old)"),
+        ));
+    }
+
+    Ok(())
 }
 
 #[async_trait]
@@ -120,38 +224,10 @@ impl TcpServerHandler for VmessTcpServerHandler {
             .read_slice_into(&mut server_stream, &mut cert_hash)
             .await?;
 
-        // we need to copy it over because if this is an aead request, we need the original
-        // bytes for decrypting the header.
-        let mut aead_bytes = [0u8; 16];
-        aead_bytes.copy_from_slice(&cert_hash);
-
-        self.aead_decrypting_key
-            .decrypt(&mut aead_bytes, DecryptionContext::None)
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "AEAD auth ID decryption failed",
-                )
-            })?;
-        let checksum = super::crc32::crc32c(&aead_bytes[0..12]);
-        let expected_checksum = u32::from_be_bytes(aead_bytes[12..16].try_into().unwrap());
-
-        if checksum != expected_checksum {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "AEAD authentication failed: checksum mismatch",
-            ));
-        }
-
-        let time_secs = u64::from_be_bytes(aead_bytes[0..8].try_into().unwrap());
-        let current_time_secs = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs();
-        let time_delta = time_secs.abs_diff(current_time_secs);
-        if time_delta > 120 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Hash timestamp is too old ({time_secs} is {time_delta} seconds old)"),
-            ));
-        }
+        let VmessServerAuth {
+            instruction_key,
+            authenticated_user,
+        } = self.authenticate_cert_hash(&cert_hash)?;
 
         let mut encrypted_payload_length = [0u8; 18];
         stream_reader
@@ -164,12 +240,12 @@ impl TcpServerHandler for VmessTcpServerHandler {
             .await?;
 
         let header_length_aead_key = super::sha2::kdf(
-            &self.instruction_key,
+            &instruction_key,
             &[b"VMess Header AEAD Key_Length", &cert_hash, &nonce],
         );
 
         let header_length_nonce = super::sha2::kdf(
-            &self.instruction_key,
+            &instruction_key,
             &[b"VMess Header AEAD Nonce_Length", &cert_hash, &nonce],
         );
 
@@ -193,12 +269,12 @@ impl TcpServerHandler for VmessTcpServerHandler {
         let payload_length = u16::from_be_bytes(encrypted_payload_length[0..2].try_into().unwrap());
 
         let header_aead_key = super::sha2::kdf(
-            &self.instruction_key,
+            &instruction_key,
             &[b"VMess Header AEAD Key", &cert_hash, &nonce],
         );
 
         let header_nonce = super::sha2::kdf(
-            &self.instruction_key,
+            &instruction_key,
             &[b"VMess Header AEAD Nonce", &cert_hash, &nonce],
         );
 
@@ -599,6 +675,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
                 Ok(TcpServerSetupResult::TcpForward {
                     remote_location,
                     stream: server_stream,
+                    authenticated_user: authenticated_user.clone(),
                     // Wait until there is data to send the response header.
                     need_initial_flush: false,
                     connection_success_response: None,
@@ -635,6 +712,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
                 Ok(TcpServerSetupResult::BidirectionalUdp {
                     remote_location,
                     stream: server_stream,
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     proxy_selector: self.proxy_selector.clone(),
                 })
@@ -672,6 +750,7 @@ impl TcpServerHandler for VmessTcpServerHandler {
 
                 Ok(TcpServerSetupResult::SessionBasedUdp {
                     stream: Box::new(xudp_stream),
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     proxy_selector: self.proxy_selector.clone(),
                 })

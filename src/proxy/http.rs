@@ -307,6 +307,7 @@ pub async fn setup_http_server_stream_inner(
     Ok(TcpServerSetupResult::TcpForward {
         remote_location,
         stream: server_stream,
+        authenticated_user: None,
         need_initial_flush,
         connection_success_response,
         initial_remote_data,

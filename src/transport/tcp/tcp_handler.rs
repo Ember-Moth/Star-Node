@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::account::AuthenticatedUser;
 use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::{AsyncMessageStream, AsyncStream, AsyncTargetedMessageStream};
 use crate::client_proxy_selector::ClientProxySelector;
@@ -11,35 +12,38 @@ pub enum TcpServerSetupResult {
     TcpForward {
         remote_location: NetLocation,
         stream: Box<dyn AsyncStream>,
+        authenticated_user: Option<AuthenticatedUser>,
         need_initial_flush: bool,
-        /// Response to write to the server stream after connection to remote location succeeds
+        /// 连接到远端成功后写回服务端流的响应。
         connection_success_response: Option<Box<[u8]>>,
-        /// Initial data to send to the remote location
+        /// 需要发送到远端的初始数据。
         initial_remote_data: Option<Box<[u8]>>,
-        /// The proxy selector to use for routing this connection
+        /// 本连接使用的出站路由选择器。
         proxy_selector: Arc<ClientProxySelector>,
     },
     BidirectionalUdp {
         need_initial_flush: bool,
         remote_location: NetLocation,
         stream: Box<dyn AsyncMessageStream>,
-        /// The proxy selector to use for routing this connection
+        authenticated_user: Option<AuthenticatedUser>,
+        /// 本连接使用的出站路由选择器。
         proxy_selector: Arc<ClientProxySelector>,
     },
     MultiDirectionalUdp {
         need_initial_flush: bool,
         stream: Box<dyn AsyncTargetedMessageStream>,
-        /// The proxy selector to use for routing this connection
+        authenticated_user: Option<AuthenticatedUser>,
+        /// 本连接使用的出站路由选择器。
         proxy_selector: Arc<ClientProxySelector>,
     },
     SessionBasedUdp {
         need_initial_flush: bool,
         stream: Box<dyn crate::async_stream::AsyncSessionMessageStream>,
-        /// The proxy selector to use for routing this connection
+        authenticated_user: Option<AuthenticatedUser>,
+        /// 本连接使用的出站路由选择器。
         proxy_selector: Arc<ClientProxySelector>,
     },
-    /// Connection has been fully handled (e.g., spawned as a background task).
-    /// No further processing needed by the caller.
+    /// 连接已被 handler 完整处理，调用方不需要继续处理。
     AlreadyHandled,
 }
 
@@ -79,45 +83,42 @@ pub trait TcpServerHandler: Send + Sync + Debug {
 
 pub struct TcpClientSetupResult {
     pub client_stream: Box<dyn AsyncStream>,
-    /// Early application data that was buffered during protocol handshake.
-    /// Only expected from the final destination - intermediate hops should not
-    /// return early data (all proxy protocols are client-initiated).
+    /// 协议握手期间缓冲的早期应用数据。
+    /// 只有最终目标可能返回早期数据，中间代理 hop 不应该返回。
     pub early_data: Option<Vec<u8>>,
 }
 
 #[async_trait]
 pub trait TcpClientHandler: Send + Sync + Debug {
-    /// Setup a client connection through this proxy.
+    /// 通过当前代理建立客户端连接。
     ///
-    /// # Arguments
-    /// * `client_stream` - The transport stream to the proxy server
-    /// * `remote_location` - The destination to connect to through the proxy.
-    ///                       May include pre-resolved address to avoid duplicate DNS lookups.
+    /// # 参数
+    /// * `client_stream` - 到代理服务器的传输流
+    /// * `remote_location` - 需要通过代理连接的目标，可能包含已解析地址以避免重复 DNS 查询。
     ///
-    /// # Returns
-    /// * `client_stream` - The wrapped stream ready for application data
-    /// * `early_data` - Any application data received during handshake (from final destination)
+    /// # 返回
+    /// * `client_stream` - 已完成包装、可传输应用数据的流
+    /// * `early_data` - 握手期间收到的早期应用数据
     async fn setup_client_tcp_stream(
         &self,
         client_stream: Box<dyn AsyncStream>,
         remote_location: ResolvedLocation,
     ) -> std::io::Result<TcpClientSetupResult>;
 
-    /// Returns true if this handler supports UDP-over-TCP tunneling.
+    /// 返回当前 handler 是否支持 UDP-over-TCP 隧道。
     fn supports_udp_over_tcp(&self) -> bool {
         false
     }
 
-    /// Setup a bidirectional UDP message stream over a TCP connection.
-    /// Only called if `supports_udp_over_tcp()` returns true.
+    /// 在 TCP 连接上建立双向 UDP message stream。
+    /// 仅在 `supports_udp_over_tcp()` 返回 true 时调用。
     ///
-    /// # Arguments
-    /// * `client_stream` - The transport stream to the proxy server
-    /// * `target` - The destination for UDP packets.
-    ///              May include pre-resolved address to avoid duplicate DNS lookups.
+    /// # 参数
+    /// * `client_stream` - 到代理服务器的传输流
+    /// * `target` - UDP 包目标，可能包含已解析地址以避免重复 DNS 查询。
     ///
-    /// # Returns
-    /// A message stream for sending/receiving UDP packets to the target.
+    /// # 返回
+    /// 用于向目标收发 UDP 包的 message stream。
     async fn setup_client_udp_bidirectional(
         &self,
         _client_stream: Box<dyn AsyncStream>,

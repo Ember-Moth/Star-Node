@@ -14,6 +14,7 @@ use crate::config::{
     BindLocation, ConfigSelection, ServerConfig, ServerProxyConfig, ServerQuicConfig,
 };
 use crate::copy_bidirectional::copy_bidirectional;
+use crate::dataplane::DataPlaneRuntime;
 use crate::quic_stream::QuicStream;
 use crate::resolver::Resolver;
 use crate::routing::{ServerStream, run_udp_routing};
@@ -136,6 +137,7 @@ async fn process_streams(
         TcpServerSetupResult::TcpForward {
             remote_location,
             stream: mut server_stream,
+            authenticated_user: _,
             need_initial_flush: server_need_initial_flush,
             proxy_selector,
             connection_success_response,
@@ -204,6 +206,7 @@ async fn process_streams(
         TcpServerSetupResult::BidirectionalUdp {
             remote_location,
             stream: server_stream,
+            authenticated_user: _,
             need_initial_flush: server_need_initial_flush,
             proxy_selector,
         } => {
@@ -232,6 +235,7 @@ async fn process_streams(
         }
         TcpServerSetupResult::MultiDirectionalUdp {
             stream: server_stream,
+            authenticated_user: _,
             need_initial_flush,
             proxy_selector,
         } => {
@@ -246,6 +250,7 @@ async fn process_streams(
         }
         TcpServerSetupResult::SessionBasedUdp {
             stream: server_stream,
+            authenticated_user: _,
             need_initial_flush,
             proxy_selector,
         } => {
@@ -268,6 +273,7 @@ async fn process_streams(
 pub async fn start_quic_servers(
     config: ServerConfig,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     let ServerConfig {
         bind_location,
@@ -385,9 +391,14 @@ pub async fn start_quic_servers(
         tcp_protocol => {
             let bind_ip = bind_addresses.first().map(|addr| addr.ip());
 
-            let tcp_handler: Arc<dyn TcpServerHandler> =
-                create_tcp_server_handler(tcp_protocol, &client_proxy_selector, &resolver, bind_ip)
-                    .into();
+            let tcp_handler: Arc<dyn TcpServerHandler> = create_tcp_server_handler(
+                tcp_protocol,
+                &client_proxy_selector,
+                &resolver,
+                bind_ip,
+                &runtime,
+            )
+            .into();
 
             for bind_address in bind_addresses.into_iter() {
                 let quic_server_config = quic_server_config.clone();

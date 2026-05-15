@@ -1,4 +1,4 @@
-//! Factory functions for creating TCP server handlers from config.
+//! 根据配置创建 TCP server handler 的工厂函数。
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -12,6 +12,7 @@ use crate::config::{
     ConfigSelection, RealityServerConfig, ServerProxyConfig, ShadowTlsServerConfig,
     ShadowTlsServerHandshakeConfig, ShadowsocksConfig, TlsServerConfig, WebsocketServerConfig,
 };
+use crate::dataplane::DataPlaneRuntime;
 use crate::http_handler::HttpTcpServerHandler;
 use crate::mixed_handler::MixedTcpServerHandler;
 use crate::naiveproxy::UserLookup;
@@ -48,22 +49,23 @@ fn create_auth_credentials(
     }
 }
 
-/// Create a TCP server handler from config.
+/// 根据配置创建 TCP server handler。
 ///
-/// # Arguments
-/// * `server_proxy_config` - The protocol configuration
-/// * `client_proxy_selector` - Selector for outbound proxy routing
+/// # 参数
+/// * `server_proxy_config` - 协议配置
+/// * `client_proxy_selector` - 出站代理路由选择器
 /// * `resolver` - DNS resolver
-/// * `bind_ip` - Optional bind IP for handlers that need it (e.g., Socks5 UDP, Mixed)
+/// * `bind_ip` - 部分 handler 需要的可选监听 IP，例如 SOCKS5 UDP 和 Mixed
 ///
-/// The `bind_ip` is required for:
-/// - `Socks` with `udp_enabled: true` (for UDP ASSOCIATE)
-/// - `Mixed` with `udp_enabled: true` (for UDP ASSOCIATE)
+/// 下列场景需要 `bind_ip`：
+/// - `udp_enabled: true` 的 `Socks`，用于 UDP ASSOCIATE
+/// - `udp_enabled: true` 的 `Mixed`，用于 UDP ASSOCIATE
 pub fn create_tcp_server_handler(
     server_proxy_config: ServerProxyConfig,
     client_proxy_selector: &Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
     bind_ip: Option<IpAddr>,
+    runtime: &DataPlaneRuntime,
 ) -> Box<dyn TcpServerHandler> {
     match server_proxy_config {
         ServerProxyConfig::Http { username, password } => Box::new(HttpTcpServerHandler::new(
@@ -144,6 +146,7 @@ pub fn create_tcp_server_handler(
             client_proxy_selector.clone(),
             resolver.clone(),
             fallback,
+            runtime.clone(),
         )),
         ServerProxyConfig::Trojan {
             password,
@@ -166,12 +169,18 @@ pub fn create_tcp_server_handler(
                 .map(|(sni, config)| {
                     (
                         sni,
-                        create_tls_server_target(config, client_proxy_selector, resolver, bind_ip),
+                        create_tls_server_target(
+                            config,
+                            client_proxy_selector,
+                            resolver,
+                            bind_ip,
+                            runtime,
+                        ),
                     )
                 })
                 .collect::<FxHashMap<String, TlsServerTarget>>();
             let default_tls_target = default_tls_target.map(|config| {
-                create_tls_server_target(*config, client_proxy_selector, resolver, bind_ip)
+                create_tls_server_target(*config, client_proxy_selector, resolver, bind_ip, runtime)
             });
             let shadowtls_targets = shadowtls_targets
                 .into_iter()
@@ -183,6 +192,7 @@ pub fn create_tcp_server_handler(
                             client_proxy_selector,
                             resolver,
                             bind_ip,
+                            runtime,
                         ),
                     )
                 })
@@ -198,6 +208,7 @@ pub fn create_tcp_server_handler(
                             client_proxy_selector,
                             resolver,
                             bind_ip,
+                            runtime,
                         ),
                     )
                 })
@@ -220,13 +231,20 @@ pub fn create_tcp_server_handler(
             udp_enabled,
             client_proxy_selector.clone(),
             resolver.clone(),
+            runtime.clone(),
         )),
         ServerProxyConfig::Websocket { targets } => {
             let server_targets: Vec<WebsocketServerTarget> = targets
                 .into_vec()
                 .into_iter()
                 .map(|config| {
-                    create_websocket_server_target(config, client_proxy_selector, resolver, bind_ip)
+                    create_websocket_server_target(
+                        config,
+                        client_proxy_selector,
+                        resolver,
+                        bind_ip,
+                        runtime,
+                    )
                 })
                 .collect::<Vec<_>>();
             Box::new(WebsocketTcpServerHandler::new(server_targets))
@@ -289,6 +307,7 @@ fn create_tls_server_target(
     client_proxy_selector: &Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
     bind_ip: Option<IpAddr>,
+    runtime: &DataPlaneRuntime,
 ) -> TlsServerTarget {
     let TlsServerConfig {
         cert,
@@ -385,7 +404,8 @@ fn create_tls_server_target(
             unreachable!("Vision requires VLESS (should be validated during config load)")
         }
     } else {
-        let handler = create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip);
+        let handler =
+            create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip, runtime);
         InnerProtocol::Normal(handler)
     };
 
@@ -401,6 +421,7 @@ fn create_shadow_tls_server_target(
     client_proxy_selector: &Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
     bind_ip: Option<IpAddr>,
+    runtime: &DataPlaneRuntime,
 ) -> TlsServerTarget {
     let ShadowTlsServerConfig {
         password,
@@ -449,7 +470,8 @@ fn create_shadow_tls_server_target(
         client_proxy_selector.clone()
     };
 
-    let handler = create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip);
+    let handler =
+        create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip, runtime);
 
     TlsServerTarget::ShadowTls(ShadowTlsServerTarget::new(
         password,
@@ -463,6 +485,7 @@ fn create_reality_server_target(
     client_proxy_selector: &Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
     bind_ip: Option<IpAddr>,
+    runtime: &DataPlaneRuntime,
 ) -> TlsServerTarget {
     let RealityServerConfig {
         private_key,
@@ -544,7 +567,8 @@ fn create_reality_server_target(
             unreachable!("Vision requires VLESS (should be validated during config load)")
         }
     } else {
-        let handler = create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip);
+        let handler =
+            create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip, runtime);
         InnerProtocol::Normal(handler)
     };
 
@@ -588,6 +612,7 @@ fn create_websocket_server_target(
     client_proxy_selector: &Arc<ClientProxySelector>,
     resolver: &Arc<dyn Resolver>,
     bind_ip: Option<IpAddr>,
+    runtime: &DataPlaneRuntime,
 ) -> WebsocketServerTarget {
     let WebsocketServerConfig {
         matching_path,
@@ -616,7 +641,8 @@ fn create_websocket_server_target(
         client_proxy_selector.clone()
     };
 
-    let handler = create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip);
+    let handler =
+        create_tcp_server_handler(protocol, &effective_selector, resolver, bind_ip, runtime);
 
     WebsocketServerTarget {
         matching_path,

@@ -6,16 +6,18 @@ use subtle::ConstantTimeEq;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use crate::account::{AuthenticatedUser, ProtocolKind};
 use crate::address::{Address, NetLocation};
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::ClientProxySelector;
 use crate::crypto::CryptoTlsStream;
+use crate::dataplane::DataPlaneRuntime;
 use crate::h2mux::{MUX_DESTINATION_HOST, MUX_DESTINATION_PORT, handle_h2mux_session};
 use crate::resolver::Resolver;
 use crate::stream_reader::StreamReader;
 use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::util::write_all;
-use crate::uuid_util::parse_uuid;
+use crate::uuid_util::{parse_uuid, uuid_bytes_to_string};
 use crate::xudp::XudpMessageStream;
 
 use super::vision_stream::VisionStream;
@@ -31,6 +33,7 @@ pub struct VlessTcpServerHandler {
     proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     fallback: Option<NetLocation>,
+    runtime: DataPlaneRuntime,
 }
 
 impl std::fmt::Debug for VlessTcpServerHandler {
@@ -50,6 +53,7 @@ impl VlessTcpServerHandler {
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
         fallback: Option<NetLocation>,
+        runtime: DataPlaneRuntime,
     ) -> Self {
         Self {
             user_id: parse_uuid(user_id).unwrap().into_boxed_slice(),
@@ -57,7 +61,28 @@ impl VlessTcpServerHandler {
             proxy_selector,
             resolver,
             fallback,
+            runtime,
         }
+    }
+
+    fn authenticate_target_id(
+        &self,
+        target_id: &[u8],
+    ) -> std::io::Result<Option<AuthenticatedUser>> {
+        let snapshot = self.runtime.user_registry().snapshot();
+        if snapshot.has_protocol_credentials(ProtocolKind::Vless) {
+            let uuid = uuid_bytes_to_string(target_id)?;
+            return snapshot
+                .authenticate_protocol(ProtocolKind::Vless, uuid)
+                .map(Some)
+                .ok_or_else(|| std::io::Error::other("Unknown user id"));
+        }
+
+        if self.user_id.ct_eq(target_id).unwrap_u8() == 0 {
+            return Err(std::io::Error::other("Unknown user id"));
+        }
+
+        Ok(None)
     }
 }
 
@@ -153,19 +178,22 @@ impl TcpServerHandler for VlessTcpServerHandler {
         let header = stream_reader.peek_slice(&mut server_stream, 17).await?;
         let target_id = &header[1..17];
 
-        if self.user_id.ct_eq(target_id).unwrap_u8() == 0 {
-            debug!("VLESS UUID mismatch");
-            if let Some(ref fallback) = self.fallback {
-                return vless_fallback_to_dest(
-                    server_stream,
-                    stream_reader,
-                    fallback,
-                    &self.resolver,
-                )
-                .await;
+        let authenticated_user = match self.authenticate_target_id(target_id) {
+            Ok(user) => user,
+            Err(err) => {
+                debug!("VLESS UUID mismatch");
+                if let Some(ref fallback) = self.fallback {
+                    return vless_fallback_to_dest(
+                        server_stream,
+                        stream_reader,
+                        fallback,
+                        &self.resolver,
+                    )
+                    .await;
+                }
+                return Err(err);
             }
-            return Err(std::io::Error::other("Unknown user id"));
-        }
+        };
 
         stream_reader.consume(17);
 
@@ -222,6 +250,7 @@ impl TcpServerHandler for VlessTcpServerHandler {
                 Ok(TcpServerSetupResult::TcpForward {
                     remote_location,
                     stream: server_stream,
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     connection_success_response: Some(
                         SERVER_RESPONSE_HEADER.to_vec().into_boxed_slice(),
@@ -256,6 +285,7 @@ impl TcpServerHandler for VlessTcpServerHandler {
                 Ok(TcpServerSetupResult::BidirectionalUdp {
                     remote_location,
                     stream: Box::new(vless_stream),
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     proxy_selector: self.proxy_selector.clone(),
                 })
@@ -278,6 +308,7 @@ impl TcpServerHandler for VlessTcpServerHandler {
 
                 Ok(TcpServerSetupResult::SessionBasedUdp {
                     stream: Box::new(xudp_stream),
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     proxy_selector: self.proxy_selector.clone(),
                 })
@@ -375,6 +406,7 @@ where
             Ok(TcpServerSetupResult::TcpForward {
                 remote_location,
                 stream: flow_stream,
+                authenticated_user: None,
                 need_initial_flush: false,
                 connection_success_response: None, // VisionStream will send VLESS response with first write
                 initial_remote_data: None,         // Data fed to VisionStream instead
@@ -404,6 +436,7 @@ where
             Ok(TcpServerSetupResult::BidirectionalUdp {
                 remote_location,
                 stream: Box::new(vless_stream),
+                authenticated_user: None,
                 need_initial_flush: false,
                 proxy_selector: proxy_selector.clone(),
             })
@@ -434,6 +467,7 @@ where
 
                 Ok(TcpServerSetupResult::SessionBasedUdp {
                     stream: Box::new(xudp_stream),
+                    authenticated_user: None,
                     need_initial_flush: false, // VisionStream sends VLESS response on first write
                     proxy_selector: proxy_selector.clone(),
                 })
@@ -455,6 +489,7 @@ where
 
                 Ok(TcpServerSetupResult::SessionBasedUdp {
                     stream: Box::new(xudp_stream),
+                    authenticated_user: None,
                     need_initial_flush: false, // Response already sent above
                     proxy_selector,
                 })

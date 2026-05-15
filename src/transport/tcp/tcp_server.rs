@@ -12,6 +12,7 @@ use tokio::time::timeout;
 use super::tcp_client_handler_factory::create_tcp_client_proxy_selector;
 use super::tcp_server_handler_factory::create_tcp_server_handler;
 
+use crate::account::{AuthenticatedUser, UserSessionGuard};
 use crate::address::NetLocation;
 use crate::async_stream::AsyncMessageStream;
 use crate::async_stream::{AsyncShutdownMessageExt, AsyncStream};
@@ -19,11 +20,13 @@ use crate::client_proxy_selector::{ClientProxySelector, ConnectDecision};
 use crate::config::{BindLocation, Config, ConfigSelection, ServerConfig, TcpConfig, Transport};
 use crate::copy_bidirectional::copy_bidirectional;
 use crate::copy_bidirectional_message::copy_bidirectional_message;
+use crate::dataplane::DataPlaneRuntime;
 use crate::quic_server::start_quic_servers;
 use crate::resolver::Resolver;
 use crate::routing::{ServerStream, run_udp_routing};
 use crate::socket_util::{new_tcp_listener, set_tcp_keepalive};
 use crate::tcp::tcp_handler::{TcpClientSetupResult, TcpServerHandler, TcpServerSetupResult};
+use crate::telemetry::{MeteredStream, TrafficConnectionGuard, TrafficDirection};
 use crate::util::write_all;
 
 async fn run_tcp_server(
@@ -31,6 +34,8 @@ async fn run_tcp_server(
     tcp_config: TcpConfig,
     resolver: Arc<dyn Resolver>,
     server_handler: Arc<dyn TcpServerHandler>,
+    runtime: DataPlaneRuntime,
+    protocol_name: Arc<str>,
 ) -> std::io::Result<()> {
     let TcpConfig { no_delay } = tcp_config;
 
@@ -59,8 +64,15 @@ async fn run_tcp_server(
 
         let cloned_resolver = resolver.clone();
         let cloned_handler = server_handler.clone();
+        let runtime = runtime.clone();
+        let protocol_name = protocol_name.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
+            let session = runtime
+                .session_tracker()
+                .start(protocol_name.as_ref(), Some(addr));
+            if let Err(e) =
+                process_stream(stream, cloned_handler, cloned_resolver, runtime, session).await
+            {
                 error!("{}:{} finished with error: {:?}", addr.ip(), addr.port(), e);
             } else {
                 debug!("{}:{} finished successfully", addr.ip(), addr.port());
@@ -74,6 +86,8 @@ async fn run_unix_server(
     path_buf: PathBuf,
     resolver: Arc<dyn Resolver>,
     server_handler: Arc<dyn TcpServerHandler>,
+    runtime: DataPlaneRuntime,
+    protocol_name: Arc<str>,
 ) -> std::io::Result<()> {
     if tokio::fs::symlink_metadata(&path_buf).await.is_ok() {
         println!(
@@ -96,8 +110,15 @@ async fn run_unix_server(
 
         let cloned_resolver = resolver.clone();
         let cloned_handler = server_handler.clone();
+        let runtime = runtime.clone();
+        let protocol_name = protocol_name.clone();
         tokio::spawn(async move {
-            if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
+            let session = runtime
+                .session_tracker()
+                .start(protocol_name.as_ref(), None);
+            if let Err(e) =
+                process_stream(stream, cloned_handler, cloned_resolver, runtime, session).await
+            {
                 error!("{addr:?} finished with error: {e:?}");
             } else {
                 debug!("{addr:?} finished successfully");
@@ -121,6 +142,8 @@ pub async fn process_stream<AS>(
     stream: AS,
     server_handler: Arc<dyn TcpServerHandler>,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
+    mut session: crate::session::SessionContext,
 ) -> std::io::Result<()>
 where
     AS: AsyncStream + 'static,
@@ -150,11 +173,21 @@ where
         TcpServerSetupResult::TcpForward {
             remote_location,
             stream: mut server_stream,
+            authenticated_user,
             need_initial_flush: server_need_initial_flush,
             proxy_selector,
             connection_success_response,
             initial_remote_data,
         } => {
+            session.set_target(remote_location.to_string());
+            if let Some(user) = authenticated_user.as_ref() {
+                session.set_user(user.user_id.clone());
+            }
+            let (_user_session_guard, _traffic_guard) =
+                open_user_session(&runtime, authenticated_user.as_ref())?;
+            server_stream =
+                meter_server_stream(server_stream, &runtime, authenticated_user.as_ref());
+
             let setup_client_stream_future = timeout(
                 Duration::from_secs(60),
                 setup_client_tcp_stream(
@@ -218,9 +251,17 @@ where
         TcpServerSetupResult::BidirectionalUdp {
             remote_location,
             stream: server_stream,
+            authenticated_user,
             need_initial_flush: server_need_initial_flush,
             proxy_selector,
         } => {
+            session.set_target(remote_location.to_string());
+            if let Some(user) = authenticated_user.as_ref() {
+                session.set_user(user.user_id.clone());
+            }
+            let (_user_session_guard, _traffic_guard) =
+                open_user_session(&runtime, authenticated_user.as_ref())?;
+
             let action = proxy_selector
                 .judge(remote_location.into(), &resolver)
                 .await?;
@@ -249,9 +290,16 @@ where
         }
         TcpServerSetupResult::MultiDirectionalUdp {
             stream: server_stream,
+            authenticated_user,
             need_initial_flush,
             proxy_selector,
         } => {
+            if let Some(user) = authenticated_user.as_ref() {
+                session.set_user(user.user_id.clone());
+            }
+            let (_user_session_guard, _traffic_guard) =
+                open_user_session(&runtime, authenticated_user.as_ref())?;
+
             // Per-destination routing: each packet is routed based on its destination
             run_udp_routing(
                 ServerStream::Targeted(server_stream),
@@ -263,9 +311,16 @@ where
         }
         TcpServerSetupResult::SessionBasedUdp {
             stream: server_stream,
+            authenticated_user,
             need_initial_flush,
             proxy_selector,
         } => {
+            if let Some(user) = authenticated_user.as_ref() {
+                session.set_user(user.user_id.clone());
+            }
+            let (_user_session_guard, _traffic_guard) =
+                open_user_session(&runtime, authenticated_user.as_ref())?;
+
             // Per-destination routing: each session is routed based on its destination
             run_udp_routing(
                 ServerStream::Session(server_stream),
@@ -281,6 +336,45 @@ where
             Ok(())
         }
     }
+}
+
+fn open_user_session(
+    runtime: &DataPlaneRuntime,
+    authenticated_user: Option<&AuthenticatedUser>,
+) -> std::io::Result<(Option<UserSessionGuard>, Option<TrafficConnectionGuard>)> {
+    let Some(user) = authenticated_user else {
+        return Ok((None, None));
+    };
+
+    let user_session_guard = user.try_open_session().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("user session rejected: {e}"),
+        )
+    })?;
+    let traffic_guard = runtime
+        .traffic_collector()
+        .connection_guard(user.user_id.clone());
+
+    Ok((Some(user_session_guard), Some(traffic_guard)))
+}
+
+fn meter_server_stream(
+    stream: Box<dyn AsyncStream>,
+    runtime: &DataPlaneRuntime,
+    authenticated_user: Option<&AuthenticatedUser>,
+) -> Box<dyn AsyncStream> {
+    let Some(user) = authenticated_user else {
+        return stream;
+    };
+
+    Box::new(MeteredStream::new(
+        stream,
+        user.user_id.clone(),
+        runtime.traffic_collector().clone(),
+        TrafficDirection::Upload,
+        TrafficDirection::Download,
+    ))
 }
 
 pub async fn setup_client_tcp_stream(
@@ -345,9 +439,12 @@ pub async fn run_udp_copy(
 pub async fn start_servers(
     config: Config,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     match config {
-        Config::Server(server_config) => start_tcp_or_quic_servers(server_config, resolver).await,
+        Config::Server(server_config) => {
+            start_tcp_or_quic_servers(server_config, resolver, runtime).await
+        }
         _ => unreachable!("create_server_configs only returns Server configs"),
     }
 }
@@ -355,11 +452,12 @@ pub async fn start_servers(
 async fn start_tcp_or_quic_servers(
     config: ServerConfig,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     let mut join_handles = Vec::with_capacity(3);
 
     match config.transport {
-        Transport::Tcp => match start_tcp_servers(config.clone(), resolver).await {
+        Transport::Tcp => match start_tcp_servers(config.clone(), resolver, runtime).await {
             Ok(handles) => {
                 join_handles.extend(handles);
             }
@@ -370,7 +468,7 @@ async fn start_tcp_or_quic_servers(
                 return Err(e);
             }
         },
-        Transport::Quic => match start_quic_servers(config.clone(), resolver).await {
+        Transport::Quic => match start_quic_servers(config.clone(), resolver, runtime).await {
             Ok(handles) => {
                 join_handles.extend(handles);
             }
@@ -397,6 +495,7 @@ async fn start_tcp_or_quic_servers(
 async fn start_tcp_servers(
     config: ServerConfig,
     resolver: Arc<dyn Resolver>,
+    runtime: DataPlaneRuntime,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     let ServerConfig {
         bind_location,
@@ -407,6 +506,7 @@ async fn start_tcp_servers(
     } = config;
 
     println!("Starting {} TCP server at {}", &protocol, &bind_location);
+    let protocol_name: Arc<str> = Arc::from(protocol.to_string());
 
     let rules = rules.map(ConfigSelection::unwrap_config).into_vec();
     // We should always have a direct entry.
@@ -430,8 +530,14 @@ async fn start_tcp_servers(
         BindLocation::Path(_) => None, // Unix socket, no IP needed
     };
 
-    let tcp_handler: Arc<dyn TcpServerHandler> =
-        create_tcp_server_handler(protocol, &client_proxy_selector, &resolver, bind_ip).into();
+    let tcp_handler: Arc<dyn TcpServerHandler> = create_tcp_server_handler(
+        protocol,
+        &client_proxy_selector,
+        &resolver,
+        bind_ip,
+        &runtime,
+    )
+    .into();
     debug!("TCP handler: {tcp_handler:?}");
 
     let mut handles = vec![];
@@ -443,10 +549,19 @@ async fn start_tcp_servers(
                 let tcp_config = tcp_config.clone();
                 let tcp_handler = tcp_handler.clone();
                 let resolver = resolver.clone();
+                let runtime = runtime.clone();
+                let protocol_name = protocol_name.clone();
                 let handle = tokio::spawn(async move {
-                    run_tcp_server(socket_addr, tcp_config, resolver, tcp_handler)
-                        .await
-                        .unwrap();
+                    run_tcp_server(
+                        socket_addr,
+                        tcp_config,
+                        resolver,
+                        tcp_handler,
+                        runtime,
+                        protocol_name,
+                    )
+                    .await
+                    .unwrap();
                 });
                 handles.push(handle);
             }
@@ -455,8 +570,10 @@ async fn start_tcp_servers(
             #[cfg(target_family = "unix")]
             {
                 let tcp_handler = tcp_handler.clone();
+                let runtime = runtime.clone();
+                let protocol_name = protocol_name.clone();
                 let handle = tokio::spawn(async move {
-                    run_unix_server(path_buf, resolver, tcp_handler)
+                    run_unix_server(path_buf, resolver, tcp_handler, runtime, protocol_name)
                         .await
                         .unwrap();
                 });

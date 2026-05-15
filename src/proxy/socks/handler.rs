@@ -296,6 +296,7 @@ pub async fn setup_socks_server_stream_inner(
 
             return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                 stream: Box::new(uot_stream),
+                authenticated_user: None,
                 need_initial_flush: false,
                 proxy_selector: proxy_selector.clone(),
             });
@@ -328,6 +329,7 @@ pub async fn setup_socks_server_stream_inner(
                 return Ok(TcpServerSetupResult::BidirectionalUdp {
                     remote_location: destination,
                     stream: Box::new(uot_v2_stream),
+                    authenticated_user: None,
                     need_initial_flush: false,
                     proxy_selector: proxy_selector.clone(),
                 });
@@ -346,6 +348,7 @@ pub async fn setup_socks_server_stream_inner(
 
                 return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                     stream: Box::new(uot_stream),
+                    authenticated_user: None,
                     need_initial_flush: false,
                     proxy_selector: proxy_selector.clone(),
                 });
@@ -356,6 +359,7 @@ pub async fn setup_socks_server_stream_inner(
     Ok(TcpServerSetupResult::TcpForward {
         remote_location: location,
         stream: server_stream,
+        authenticated_user: None,
         need_initial_flush: true,
         connection_success_response: Some(connection_success_response.to_vec().into_boxed_slice()),
         initial_remote_data: stream_reader.unparsed_data_owned(),

@@ -2,8 +2,8 @@ use std::fmt::Write;
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
-/// Parse a UUID v4 string (with or without dashes) into 16 bytes.
-/// Validates that the UUID has version 4 and RFC 4122 variant.
+/// 解析 UUID v4 字符串，支持带短横线和不带短横线两种形式。
+/// 会校验 UUID version 4 和 RFC 4122 variant。
 #[inline]
 pub fn parse_uuid(uuid_str: &str) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(16);
@@ -53,7 +53,33 @@ pub fn parse_uuid(uuid_str: &str) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Generate a random UUID v4 and return it as a formatted string.
+/// 把 16 字节 UUID 转成小写带短横线字符串。
+#[inline]
+pub fn uuid_bytes_to_string(bytes: &[u8]) -> std::io::Result<String> {
+    if bytes.len() != 16 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid uuid byte length: {}", bytes.len()),
+        ));
+    }
+
+    let mut s = String::with_capacity(36);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            s.push('-');
+        }
+        write!(s, "{:02x}", b).unwrap();
+    }
+    Ok(s)
+}
+
+/// 把 UUID 字符串规范化成小写带短横线形式。
+#[inline]
+pub fn normalize_uuid(uuid_str: &str) -> std::io::Result<String> {
+    uuid_bytes_to_string(&parse_uuid(uuid_str)?)
+}
+
+/// 生成随机 UUID v4，并返回小写带短横线字符串。
 #[inline]
 pub fn generate_uuid() -> String {
     let rng = SystemRandom::new();
@@ -66,14 +92,7 @@ pub fn generate_uuid() -> String {
     // Set variant (RFC 4122) in bits 6-7 of byte 8
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
-    let mut s = String::with_capacity(36);
-    for (i, &b) in bytes.iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            s.push('-');
-        }
-        write!(s, "{:02x}", b).unwrap();
-    }
-    s
+    uuid_bytes_to_string(&bytes).unwrap()
 }
 
 #[cfg(test)]
@@ -134,6 +153,15 @@ mod tests {
         assert_eq!(bytes.len(), 16);
         assert_eq!(bytes[0], 0x55);
         assert_eq!(bytes[1], 0x0e);
+    }
+
+    #[test]
+    fn test_normalize_uuid() {
+        let uuid = "550E8400E29B41D4A716446655440000";
+        assert_eq!(
+            normalize_uuid(uuid).unwrap(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
     }
 
     #[test]

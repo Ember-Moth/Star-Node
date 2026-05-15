@@ -213,6 +213,7 @@ impl TcpServerHandler for SnellServerHandler {
             Ok(TcpServerSetupResult::TcpForward {
                 remote_location,
                 stream: Box::new(server_stream),
+                authenticated_user: None,
 
                 // flush the tunnel response
                 need_initial_flush: true,
@@ -230,6 +231,7 @@ impl TcpServerHandler for SnellServerHandler {
 
             Ok(TcpServerSetupResult::MultiDirectionalUdp {
                 stream: Box::new(udp_stream),
+                authenticated_user: None,
                 need_initial_flush: true,
                 proxy_selector: self.proxy_selector.clone(),
             })
