@@ -3,6 +3,7 @@
 // Public API
 pub mod vless_client_handler;
 pub mod vless_server_handler;
+pub(crate) mod xudp;
 
 // Internal implementation details
 pub mod tls_deframer;

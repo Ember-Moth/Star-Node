@@ -30,7 +30,7 @@ All server protocols plus:
 
 ### TUN/VPN Mode
 - **TUN device support** - Layer 3 VPN for transparent proxying
-- Supported platforms: Linux, Android, iOS
+- Supported platform: Linux
 
 ### Supported Ciphers
 - **VMess**: `aes-128-gcm`, `chacha20-poly1305`, `none`

@@ -2,6 +2,7 @@
 
 // REALITY protocol: TLS obfuscation using X25519, HKDF-SHA256, AES-256-GCM, HMAC-SHA512
 
+pub(crate) mod client_handler;
 mod common;
 mod reality_aead;
 mod reality_auth;

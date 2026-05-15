@@ -12,18 +12,16 @@ categories = ["command-line-utilities", "network-programming"]
 
 [lib]
 name = "shoes"
-# rlib = Rust library (for Rust dependencies)
-# cdylib = C dynamic library (.so on Linux/Android, .dylib on macOS)
-# staticlib = C static library (.a) - required for iOS
-crate-type = ["rlib", "cdylib", "staticlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "shoes"
 path = "src/main.rs"
 
+[workspace]
+
 [features]
 default = []
-ffi = []  # Enable FFI module for non-Android builds
 
 [dependencies]
 async-trait = "*"
@@ -95,11 +93,6 @@ tokio-rustls = "*"
 # jemalloc for better memory performance (not supported on Windows MSVC or iOS)
 [target.'cfg(not(any(target_env = "msvc", target_os = "ios")))'.dependencies]
 tikv-jemallocator = "*"
-
-[target.'cfg(target_os = "android")'.dependencies]
-android_logger = "*"
-jni = "0.22"
-ndk-sys = "*"
 
 [profile.release]
 opt-level = 3

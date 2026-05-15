@@ -217,12 +217,6 @@ reality_targets:
 - **Performance**: Optimized buffer handling and reduced allocations
 - **QUIC**: Better buffer sizing based on quic-go recommendations
 
-### Mobile Support
-
-- **iOS FFI**: Added iOS bindings via `NEPacketTunnelProvider` integration
-- **Android FFI**: Added Android bindings via `VpnService` integration
-- Library now builds as `rlib`, `cdylib`, and `staticlib` for mobile embedding
-
 ---
 
 ## v0.2.1

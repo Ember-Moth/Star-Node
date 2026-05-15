@@ -12,14 +12,14 @@
 //! By limiting the number of spawned tasks to a fixed pool size (e.g., 4-8 workers),
 //! the connection driver has much less competition for scheduler time.
 
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use log::{debug, error};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 /// Type alias for boxed futures that the worker pool processes.

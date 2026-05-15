@@ -68,44 +68,6 @@ impl LogWriter for FileLogWriter {
     }
 }
 
-/// Writes to a file that may be set after logger init (FFI use case).
-/// References a global `OnceLock<parking_lot::Mutex<Option<File>>>`.
-// Used by iOS/Android FFI targets (ffi/ios.rs, ffi/android.rs).
-#[allow(dead_code)]
-pub struct DynamicFileLogWriter {
-    file: &'static std::sync::OnceLock<parking_lot::Mutex<Option<File>>>,
-}
-
-// Used by iOS/Android FFI targets (ffi/ios.rs, ffi/android.rs).
-#[allow(dead_code)]
-impl DynamicFileLogWriter {
-    pub fn new(file: &'static std::sync::OnceLock<parking_lot::Mutex<Option<File>>>) -> Self {
-        Self { file }
-    }
-}
-
-impl LogWriter for DynamicFileLogWriter {
-    fn write_log(&self, _record: &Record, formatted: &str) {
-        if let Some(mutex) = self.file.get() {
-            let mut guard = mutex.lock();
-            if let Some(ref mut file) = *guard {
-                let mut line = formatted.to_string();
-                line.push('\n');
-                let _ = file.write_all(line.as_bytes());
-            }
-        }
-    }
-
-    fn flush(&self) {
-        if let Some(mutex) = self.file.get() {
-            let mut guard = mutex.lock();
-            if let Some(ref mut file) = *guard {
-                let _ = file.flush();
-            }
-        }
-    }
-}
-
 thread_local! {
     static FMT_BUF: Cell<String> = Cell::new(String::with_capacity(256));
 }
