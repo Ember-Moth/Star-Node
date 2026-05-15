@@ -11,7 +11,6 @@
 //! # Features
 //!
 //! - **Multi-protocol support**: VLESS, VMess, Trojan, Shadowsocks, and more
-//! - **TUN device support**: Virtual network interface for VPN mode
 //! - **Proxy chaining**: Connect through multiple proxies
 //! - **Flexible routing**: Rule-based traffic routing
 //!
@@ -76,7 +75,3 @@ pub mod config;
 
 /// Multi-output logging infrastructure.
 pub mod logging;
-
-/// TUN device support for VPN mode.
-#[cfg(unix)]
-pub mod tun;

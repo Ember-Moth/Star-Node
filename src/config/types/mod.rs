@@ -22,7 +22,6 @@ pub mod selection;
 pub mod server;
 pub mod shadowsocks;
 pub mod transport;
-pub mod tun;
 
 // Re-export all public types for convenience
 #[allow(unused_imports)]
@@ -41,4 +40,3 @@ pub use server::{
 };
 pub use shadowsocks::ShadowsocksConfig;
 pub use transport::{BindLocation, ClientQuicConfig, ServerQuicConfig, TcpConfig, Transport};
-pub use tun::TunConfig;

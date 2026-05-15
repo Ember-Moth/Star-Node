@@ -15,10 +15,6 @@
 - Added 5-minute stream handler timeout to prevent hung streams (slow DNS, stuck connections) from leaking memory
 - Reduced allocations in padding frame generation
 
-#### TUN Connection Tracking
-- Refactored TCP connection state machine with explicit states (Normal, Close, Closing, Closed) for proper lifecycle management
-- Improved connection teardown handling following shadowsocks-rust patterns
-
 ## v0.2.6
 
 ### New Features
@@ -147,32 +143,6 @@ Auto-detects HTTP or SOCKS5 protocol.
     password: pass
     udp_enabled: true  # Enable SOCKS5 UDP ASSOCIATE
 ```
-
-#### TUN/VPN Support
-Layer 3 VPN mode using TUN devices for transparent proxying. Supports Linux, Android, and iOS.
-
-```yaml
-- device_name: "tun0"
-  address: "10.0.0.1"
-  netmask: "255.255.255.0"
-  mtu: 1500
-  tcp_enabled: true
-  udp_enabled: true
-  icmp_enabled: true
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        address: "proxy.example.com:443"
-        protocol:
-          type: vless
-          user_id: "uuid"
-```
-
-**Platform support:**
-- Linux: Creates TUN device with specified name/address (requires root)
-- Android: Use `device_fd` from `VpnService.Builder.establish()`
-- iOS: Use `device_fd` from `NEPacketTunnelProvider.packetFlow`
 
 #### SOCKS5 UDP ASSOCIATE
 Full UDP support for SOCKS5 servers including UDP ASSOCIATE command. Enable with `udp_enabled: true` (default).

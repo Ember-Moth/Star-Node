@@ -12,8 +12,6 @@ mod runtime;
 mod security;
 mod support;
 mod transport;
-#[cfg(unix)]
-mod tun;
 
 pub(crate) use client::proxy_chain as client_proxy_chain;
 pub(crate) use client::proxy_selector as client_proxy_selector;
@@ -392,7 +390,6 @@ fn main() {
                 // Get the resolver for this server from the registry
                 let dns_ref = match &server_config {
                     config::Config::Server(s) => s.dns.as_ref(),
-                    config::Config::TunServer(t) => t.dns.as_ref(),
                     _ => None,
                 };
                 let resolver = dns_registry.get_for_server(dns_ref);

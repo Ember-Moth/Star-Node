@@ -28,10 +28,6 @@ All server protocols plus:
 - **XTLS Reality**
 - **XTLS Vision** (for VLESS)
 
-### TUN/VPN Mode
-- **TUN device support** - Layer 3 VPN for transparent proxying
-- Supported platform: Linux
-
 ### Supported Ciphers
 - **VMess**: `aes-128-gcm`, `chacha20-poly1305`, `none`
 - **Shadowsocks**: `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-ietf-poly1305`
@@ -239,26 +235,6 @@ See the [examples](./examples) directory for all examples.
             - username: user1
               password: secret123
           padding: true
-```
-
-### TUN VPN
-```yaml
-- device_name: tun0
-  address: 10.0.0.1
-  netmask: 255.255.255.0
-  mtu: 1500
-  tcp_enabled: true
-  udp_enabled: true
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        address: "proxy.example.com:443"
-        protocol:
-          type: tls
-          protocol:
-            type: vless
-            user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
 ```
 
 ## Similar Projects

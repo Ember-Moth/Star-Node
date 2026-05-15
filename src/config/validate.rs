@@ -15,7 +15,7 @@ use super::types::{
     DEFAULT_REALITY_SHORT_ID, DnsConfig, DnsConfigGroup, DnsServerSpec, ExpandedDnsGroup,
     ExpandedDnsSpec, PemSource, RuleActionConfig, RuleConfig, ServerConfig, ServerProxyConfig,
     ServerQuicConfig, ShadowTlsServerConfig, ShadowTlsServerHandshakeConfig, ShadowsocksConfig,
-    TlsServerConfig, Transport, TunConfig, WebsocketServerConfig, direct_allow_rule,
+    TlsServerConfig, Transport, WebsocketServerConfig, direct_allow_rule,
 };
 
 const MIN_TLS_BUFFER_SIZE: usize = 16 * 1024;
@@ -35,7 +35,7 @@ pub struct ValidatedConfigs {
 /// - Resolves group references using topological sort
 /// - Collects named PEMs
 /// - Expands DNS groups (composition, client chains) and validates them
-/// - Validates all ServerConfigs and TunConfigs against the groups and PEMs
+/// - Validates all ServerConfigs against the groups and PEMs
 /// - Returns ValidatedConfigs containing configs and expanded DNS groups
 pub fn create_server_configs(all_configs: Vec<Config>) -> std::io::Result<ValidatedConfigs> {
     // First pass: collect raw groups with unresolved references
@@ -66,7 +66,6 @@ pub fn create_server_configs(all_configs: Vec<Config>) -> std::io::Result<Valida
     );
 
     let mut server_configs: Vec<ServerConfig> = vec![];
-    let mut tun_configs: Vec<TunConfig> = vec![];
     let mut named_pems: HashMap<String, String> = HashMap::new();
     let mut dns_groups: HashMap<String, DnsConfigGroup> = HashMap::new();
 
@@ -96,9 +95,6 @@ pub fn create_server_configs(all_configs: Vec<Config>) -> std::io::Result<Valida
             }
             Config::Server(server_config) => {
                 server_configs.push(server_config);
-            }
-            Config::TunServer(tun_config) => {
-                tun_configs.push(tun_config);
             }
             Config::NamedPem(pem) => {
                 let pem_data = match pem.source {
@@ -137,13 +133,10 @@ pub fn create_server_configs(all_configs: Vec<Config>) -> std::io::Result<Valida
         }
     }
 
-    // Extract inline DNS configs from server/tun configs into dns_groups.
+    // Extract inline DNS configs from server configs into dns_groups.
     // This replaces inline specs with group name references.
     let mut inline_dns_counter = 0u32;
     for config in server_configs.iter_mut() {
-        extract_inline_dns(&mut config.dns, &mut dns_groups, &mut inline_dns_counter)?;
-    }
-    for config in tun_configs.iter_mut() {
         extract_inline_dns(&mut config.dns, &mut dns_groups, &mut inline_dns_counter)?;
     }
 
@@ -174,18 +167,8 @@ pub fn create_server_configs(all_configs: Vec<Config>) -> std::io::Result<Valida
         validate_dns_group_ref(&config.dns, &group_names)?;
     }
 
-    // Validate TUN configs.
-    for config in tun_configs.iter_mut() {
-        validate_tun_config(config, &client_groups, &rule_groups)?;
-        validate_dns_group_ref(&config.dns, &group_names)?;
-    }
-
-    // Combine into Config list (only Server and TunServer variants)
-    let mut result: Vec<Config> = server_configs.into_iter().map(Config::Server).collect();
-    result.extend(tun_configs.into_iter().map(Config::TunServer));
-
     Ok(ValidatedConfigs {
-        configs: result,
+        configs: server_configs.into_iter().map(Config::Server).collect(),
         dns_groups: final_dns_groups,
     })
 }
@@ -1228,62 +1211,6 @@ fn validate_server_proxy_config(
     Ok(())
 }
 
-/// Validates a TUN configuration.
-fn validate_tun_config(
-    config: &mut TunConfig,
-    client_groups: &HashMap<String, Vec<ClientConfig>>,
-    rule_groups: &HashMap<String, Vec<RuleConfig>>,
-) -> std::io::Result<()> {
-    // Validate ICMP requires TCP
-    if !config.tcp_enabled && config.icmp_enabled {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "TUN: TCP must be enabled for ICMP",
-        ));
-    }
-
-    // Validate that we have either Linux config (device_name/address) or mobile config (device_fd)
-    #[cfg(target_os = "linux")]
-    {
-        if config.device_fd.is_none() && (config.device_name.is_none() || config.address.is_none())
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "TUN on Linux requires either 'device_fd' or both 'device_name' and 'address'",
-            ));
-        }
-    }
-    #[cfg(target_os = "android")]
-    {
-        if config.device_fd.is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "TUN on Android requires 'device_fd' from VpnService.Builder.establish()",
-            ));
-        }
-    }
-    #[cfg(target_os = "ios")]
-    {
-        if config.device_fd.is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "TUN on iOS requires 'device_fd' from NEPacketTunnelProvider.packetFlow",
-            ));
-        }
-    }
-
-    // Resolve rule group references
-    ConfigSelection::replace_none_or_some_groups(&mut config.rules, rule_groups)?;
-
-    // Validate rules
-    for rule in config.rules.iter_mut() {
-        let rule = rule.unwrap_config_mut();
-        validate_rule_config(rule, client_groups, &HashMap::new())?;
-    }
-
-    Ok(())
-}
-
 fn validate_rule_config(
     rule_config: &mut RuleConfig,
     client_groups: &HashMap<String, Vec<ClientConfig>>,
@@ -1942,117 +1869,6 @@ mod tests {
         ]);
 
         assert!(validate_direct_connector_positions(&hops, 0).is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_tun_config_parsing() {
-        let yaml = r#"
-- device_name: "tun0"
-  address: "10.0.0.1"
-  netmask: "255.255.255.0"
-  mtu: 1400
-  tcp_enabled: true
-  udp_enabled: true
-  icmp_enabled: false
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        - protocol:
-            type: direct
-"#;
-        let configs: Vec<Config> = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(configs.len(), 1);
-
-        match &configs[0] {
-            Config::TunServer(tun) => {
-                assert_eq!(tun.device_name, Some("tun0".to_string()));
-                assert_eq!(tun.address, Some("10.0.0.1".parse().unwrap()));
-                assert_eq!(tun.netmask, Some("255.255.255.0".parse().unwrap()));
-                assert_eq!(tun.mtu, 1400);
-                assert!(tun.tcp_enabled);
-                assert!(tun.udp_enabled);
-                assert!(!tun.icmp_enabled);
-            }
-            _ => panic!("Expected TunServer config"),
-        }
-
-        // Validate the config
-        let result = validate_configs_test(configs).await;
-        assert!(result.is_ok(), "TUN config validation failed: {:?}", result);
-    }
-
-    #[tokio::test]
-    async fn test_tun_config_with_device_fd() {
-        let yaml = r#"
-- device_fd: 42
-  mtu: 1500
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        - protocol:
-            type: direct
-"#;
-        let configs: Vec<Config> = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(configs.len(), 1);
-
-        match &configs[0] {
-            Config::TunServer(tun) => {
-                assert_eq!(tun.device_fd, Some(42));
-                assert_eq!(tun.device_name, None);
-                assert_eq!(tun.mtu, 1500);
-            }
-            _ => panic!("Expected TunServer config"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tun_config_defaults() {
-        let yaml = r#"
-- device_name: "tun0"
-  address: "10.0.0.1"
-"#;
-        let configs: Vec<Config> = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(configs.len(), 1);
-
-        match &configs[0] {
-            Config::TunServer(tun) => {
-                // Check defaults
-                assert_eq!(tun.mtu, 1500); // default
-                assert!(tun.tcp_enabled); // default true
-                assert!(tun.udp_enabled); // default true
-                assert!(tun.icmp_enabled); // default true
-            }
-            _ => panic!("Expected TunServer config"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_tun_icmp_requires_tcp() {
-        // ICMP requires TCP to be enabled
-        let tun_config = TunConfig {
-            device_name: Some("tun0".to_string()),
-            device_fd: None,
-            address: Some("10.0.0.1".parse().unwrap()),
-            netmask: None,
-            destination: None,
-            mtu: 1500,
-            tcp_enabled: false, // TCP disabled
-            udp_enabled: true,
-            icmp_enabled: true, // but ICMP enabled - should fail
-            rules: NoneOrSome::Unspecified,
-            dns: None,
-        };
-
-        let configs = vec![Config::TunServer(tun_config)];
-        let result = validate_configs_test(configs).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("TCP must be enabled for ICMP"),
-            "Expected ICMP/TCP error, got: {err}"
-        );
     }
 
     #[tokio::test]

@@ -6,7 +6,6 @@ shoes uses YAML configuration files. Multiple configuration types can be combine
 - [Configuration Structure](#configuration-structure)
 - [Server Config](#server-config)
 - [Server Protocols](#server-protocols)
-- [TUN Config](#tun-config)
 - [Client Config](#client-config)
 - [Client Protocols](#client-protocols)
 - [Rules System](#rules-system)
@@ -20,7 +19,6 @@ shoes uses YAML configuration files. Multiple configuration types can be combine
 A configuration file is a YAML array containing one or more configuration entries. Each entry can be:
 
 - **Server Config** - Defines a proxy server instance
-- **TUN Config** - Defines a TUN/VPN device for transparent proxying
 - **Client Config Group** - Defines reusable upstream proxy configurations
 - **Rule Config Group** - Defines reusable routing rules
 - **Named PEM** - Defines reusable certificate/key data
@@ -29,11 +27,6 @@ A configuration file is a YAML array containing one or more configuration entrie
 # Server configs have 'address' or 'path'
 - address: "0.0.0.0:8080"
   protocol: ...
-
-# TUN configs have 'device_name' or 'device_fd'
-- device_name: "tun0"
-  address: "10.0.0.1"
-  ...
 
 # Client config groups have 'client_group'
 - client_group: my-upstream
@@ -292,55 +285,6 @@ protocol:
 ```
 
 NaiveProxy implements HTTP/2 CONNECT with padding for censorship resistance. Should be used within TLS with `alpn_protocols: ["h2"]`.
-
-## TUN Config
-
-TUN (network TUNnel) devices operate at the IP layer (Layer 3), allowing shoes to act as a transparent VPN.
-
-```yaml
-# Linux: Create TUN device by name
-device_name: string            # Device name (e.g., "tun0")
-address: string                # Device IP address (e.g., "10.0.0.1")
-netmask: string?               # Netmask (e.g., "255.255.255.0")
-destination: string?           # Gateway/destination (Linux only)
-
-# iOS/Android: Use existing file descriptor
-device_fd: int                 # FD from VpnService (Android) or NEPacketTunnelProvider (iOS)
-
-# Common settings
-mtu: 1500                      # Default: 1500 (Linux), 9000 (Android), 4064 (iOS)
-tcp_enabled: true              # Default: true
-udp_enabled: true              # Default: true
-icmp_enabled: true             # Default: true
-
-# Routing rules
-rules: [RuleConfig]
-```
-
-**Platform notes:**
-- **Linux**: Requires root or `CAP_NET_ADMIN`. Creates device with specified name/address.
-- **Android**: Use `device_fd` from `VpnService.Builder.establish()`. Routes configured via VpnService.
-- **iOS**: Use `device_fd` from `NEPacketTunnelProvider.packetFlow`.
-
-**Example (Linux):**
-```yaml
-- device_name: "tun0"
-  address: "10.0.0.1"
-  netmask: "255.255.255.0"
-  mtu: 1500
-  tcp_enabled: true
-  udp_enabled: true
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        address: "proxy.example.com:443"
-        protocol:
-          type: tls
-          protocol:
-            type: vless
-            user_id: "uuid"
-```
 
 ## Client Config
 
