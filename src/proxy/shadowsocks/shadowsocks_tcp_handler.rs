@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use log::debug;
 use parking_lot::Mutex;
 use rand::{Rng, RngExt};
@@ -8,10 +9,12 @@ use tokio::io::AsyncWriteExt;
 
 use super::salt_checker::SaltChecker;
 use super::timed_salt_checker::TimedSaltChecker;
+use crate::account::ProtocolKind;
 use crate::address::{Address, NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncMessageStream;
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::ClientProxySelector;
+use crate::dataplane::DataPlaneRuntime;
 use crate::h2mux::{MUX_DESTINATION_HOST, MUX_DESTINATION_PORT, handle_h2mux_session};
 use crate::resolver::Resolver;
 use crate::socks_handler::{read_location, write_location_to_vec};
@@ -26,7 +29,7 @@ use super::blake3_key::Blake3Key;
 use super::default_key::DefaultKey;
 use super::shadowsocks_cipher::ShadowsocksCipher;
 use super::shadowsocks_key::ShadowsocksKey;
-use super::shadowsocks_stream::ShadowsocksStream;
+use super::shadowsocks_stream::{ShadowsocksServerUserKey, ShadowsocksStream};
 use super::shadowsocks_stream_type::ShadowsocksStreamType;
 
 #[derive(Debug)]
@@ -40,6 +43,7 @@ pub struct ShadowsocksTcpHandler {
     proxy_selector: Option<Arc<ClientProxySelector>>,
     /// DNS resolver for h2mux sessions. None when used as client handler.
     resolver: Option<Arc<dyn Resolver>>,
+    runtime: Option<DataPlaneRuntime>,
 }
 
 impl ShadowsocksTcpHandler {
@@ -50,6 +54,7 @@ impl ShadowsocksTcpHandler {
         udp_enabled: bool,
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
+        runtime: DataPlaneRuntime,
     ) -> Self {
         let key: Arc<Box<dyn ShadowsocksKey>> = Arc::new(Box::new(DefaultKey::new(
             password,
@@ -63,6 +68,7 @@ impl ShadowsocksTcpHandler {
             udp_enabled,
             proxy_selector: Some(proxy_selector),
             resolver: Some(resolver),
+            runtime: Some(runtime),
         }
     }
 
@@ -80,6 +86,7 @@ impl ShadowsocksTcpHandler {
             udp_enabled,
             proxy_selector: None,
             resolver: None,
+            runtime: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl ShadowsocksTcpHandler {
         udp_enabled: bool,
         proxy_selector: Arc<ClientProxySelector>,
         resolver: Arc<dyn Resolver>,
+        runtime: DataPlaneRuntime,
     ) -> Self {
         let key: Arc<Box<dyn ShadowsocksKey>> = Arc::new(Box::new(Blake3Key::new(
             key_bytes.to_vec().into_boxed_slice(),
@@ -103,6 +111,7 @@ impl ShadowsocksTcpHandler {
             udp_enabled,
             proxy_selector: Some(proxy_selector),
             resolver: Some(resolver),
+            runtime: Some(runtime),
         }
     }
 
@@ -124,7 +133,65 @@ impl ShadowsocksTcpHandler {
             udp_enabled,
             proxy_selector: None,
             resolver: None,
+            runtime: None,
         }
+    }
+
+    fn dynamic_user_keys(&self) -> std::io::Result<Option<Vec<ShadowsocksServerUserKey>>> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(None);
+        };
+
+        let snapshot = runtime.user_registry().snapshot();
+        if !snapshot.has_protocol_credentials(ProtocolKind::Shadowsocks) {
+            return Ok(None);
+        }
+
+        let credentials = snapshot.credentials_for_protocol(ProtocolKind::Shadowsocks);
+        if credentials.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Shadowsocks user is disabled",
+            ));
+        }
+
+        let mut user_keys = Vec::with_capacity(credentials.len());
+        for (password, authenticated_user) in credentials {
+            let key: Arc<Box<dyn ShadowsocksKey>> = if self.aead2022 {
+                let key_bytes = BASE64.decode(password.as_bytes()).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid Shadowsocks AEAD2022 user key: {e}"),
+                    )
+                })?;
+                if key_bytes.len() != self.cipher.salt_len() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "invalid Shadowsocks AEAD2022 key length: expected {}, got {}",
+                            self.cipher.salt_len(),
+                            key_bytes.len()
+                        ),
+                    ));
+                }
+                Arc::new(Box::new(Blake3Key::new(
+                    key_bytes.into_boxed_slice(),
+                    self.cipher.algorithm().key_len(),
+                )))
+            } else {
+                Arc::new(Box::new(DefaultKey::new(
+                    &password,
+                    self.cipher.algorithm().key_len(),
+                )))
+            };
+
+            user_keys.push(ShadowsocksServerUserKey {
+                key,
+                authenticated_user,
+            });
+        }
+
+        Ok(Some(user_keys))
     }
 }
 
@@ -140,12 +207,14 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
             ShadowsocksStreamType::Aead
         };
 
-        let mut server_stream = ShadowsocksStream::new(
+        let dynamic_user_keys = self.dynamic_user_keys()?;
+        let mut server_stream = ShadowsocksStream::new_with_user_keys(
             server_stream,
             stream_type,
             self.cipher.algorithm(),
             self.cipher.salt_len(),
             self.key.clone(),
+            dynamic_user_keys,
             self.salt_checker.clone(),
         );
 
@@ -169,6 +238,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
                     .await?;
             }
         }
+        let authenticated_user = server_stream.authenticated_user();
 
         // Checks for h2mux magic destination
         if let Address::Hostname(host) = remote_location.address()
@@ -226,7 +296,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
 
                 return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                     stream: Box::new(uot_stream),
-                    authenticated_user: None,
+                    authenticated_user: authenticated_user.clone(),
                     need_initial_flush: false,
                     proxy_selector: self
                         .proxy_selector
@@ -257,7 +327,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
                     return Ok(TcpServerSetupResult::BidirectionalUdp {
                         remote_location: destination,
                         stream: Box::new(uot_v2_stream),
-                        authenticated_user: None,
+                        authenticated_user: authenticated_user.clone(),
                         need_initial_flush: false,
                         proxy_selector: self
                             .proxy_selector
@@ -278,7 +348,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
 
                     return Ok(TcpServerSetupResult::MultiDirectionalUdp {
                         stream: Box::new(uot_stream),
-                        authenticated_user: None,
+                        authenticated_user: authenticated_user.clone(),
                         need_initial_flush: false,
                         proxy_selector: self
                             .proxy_selector
@@ -292,7 +362,7 @@ impl TcpServerHandler for ShadowsocksTcpHandler {
         Ok(TcpServerSetupResult::TcpForward {
             remote_location,
             stream: Box::new(server_stream),
-            authenticated_user: None,
+            authenticated_user,
             // Lets the IV be written when data actually arrives rather than flushing here.
             need_initial_flush: false,
             connection_success_response: None,

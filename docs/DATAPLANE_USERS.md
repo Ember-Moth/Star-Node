@@ -182,12 +182,13 @@ session_id=123 user_id=u_1 protocol=vless client=1.2.3.4 target=example.com:443
 - `UserSnapshot` 已支持 UUID 凭据规范化、按协议判断是否存在动态凭据、按协议枚举候选凭据。
 - 普通 TCP VLESS：如果用户快照中存在 VLESS 凭据，则只查动态用户表；如果没有动态 VLESS 凭据，则回退原 YAML 静态 UUID，保持旧配置可用。
 - 普通 TCP VMess：如果用户快照中存在 VMess 凭据，则遍历动态 VMess UUID 候选解 AEAD auth id；认证成功后把对应 `AuthenticatedUser` 返回给 TCP 公共路径。
-- 普通 TCP VLESS/VMess 认证成功后，TCP 公共路径已经可以按用户创建 session guard、连接计数 guard，并记录上传/下载字节。
+- 普通 TCP Shadowsocks：如果用户快照中存在 Shadowsocks 凭据，则为每个启用用户构造候选 key；标准 AEAD 用首个加密长度块试 key，AEAD2022 用加密固定请求头试 key。认证成功后连接固定使用该用户 key。
+- 普通 TCP VLESS/VMess/Shadowsocks 认证成功后，TCP 公共路径已经可以按用户创建 session guard、连接计数 guard，并记录上传/下载字节。
 
 剩余限制：
 
 - Vision VLESS 仍走 TLS/Reality 内部的静态 UUID 路径，尚未接入动态用户表。
-- VLESS/VMess 命中 h2mux 后会返回 `AlreadyHandled` 并在协议内启动 h2mux session，暂时不会经过 TCP 公共计量 wrapper。
+- VLESS/VMess/Shadowsocks 命中 h2mux 后会返回 `AlreadyHandled` 并在协议内启动 h2mux session，暂时不会经过 TCP 公共计量 wrapper。
 - QUIC server 已能拿到 `DataPlaneRuntime`，但 QUIC stream 还没有把 `authenticated_user` 接到 session、限速和流量计量。
 - UDP/XUDP/UoT 当前只在连接级打开用户 session，逐包/逐 message 的字节计量和限速留到第四阶段。
 
@@ -199,7 +200,7 @@ session_id=123 user_id=u_1 protocol=vless client=1.2.3.4 target=example.com:443
 4. Vision VLESS
 5. AnyTLS 和 NaiveProxy
 6. Hysteria2 和 TUIC
-7. Shadowsocks 和 Snell
+7. Snell
 
 ### 第四阶段：UDP 与多路复用
 

@@ -17,6 +17,7 @@ use super::aead_util::TAG_LEN;
 use super::salt_checker::SaltChecker;
 use super::shadowsocks_key::ShadowsocksKey;
 use super::shadowsocks_stream_type::ShadowsocksStreamType;
+use crate::account::AuthenticatedUser;
 use crate::async_stream::{
     AsyncFlushMessage, AsyncMessageStream, AsyncPing, AsyncReadMessage, AsyncShutdownMessage,
     AsyncStream, AsyncWriteMessage,
@@ -56,6 +57,8 @@ pub struct ShadowsocksStream {
     algorithm: &'static Algorithm,
     salt_len: usize,
     key: Arc<Box<dyn ShadowsocksKey>>,
+    dynamic_user_keys: Option<Vec<ShadowsocksServerUserKey>>,
+    authenticated_user: Option<AuthenticatedUser>,
     salt_checker: Option<Arc<Mutex<dyn SaltChecker>>>,
     encrypt_iv: Box<[u8]>,
     decrypt_iv: Option<Box<[u8]>>,
@@ -80,6 +83,12 @@ pub struct ShadowsocksStream {
     is_eof: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ShadowsocksServerUserKey {
+    pub key: Arc<Box<dyn ShadowsocksKey>>,
+    pub authenticated_user: AuthenticatedUser,
+}
+
 enum DecryptState {
     NeedData,
     BufferFull,
@@ -97,6 +106,26 @@ impl ShadowsocksStream {
         key: Arc<Box<dyn ShadowsocksKey>>,
         salt_checker: Option<Arc<Mutex<dyn SaltChecker>>>,
     ) -> Self {
+        Self::new_with_user_keys(
+            stream,
+            stream_type,
+            algorithm,
+            salt_len,
+            key,
+            None,
+            salt_checker,
+        )
+    }
+
+    pub fn new_with_user_keys(
+        stream: Box<dyn AsyncStream>,
+        stream_type: ShadowsocksStreamType,
+        algorithm: &'static Algorithm,
+        salt_len: usize,
+        key: Arc<Box<dyn ShadowsocksKey>>,
+        dynamic_user_keys: Option<Vec<ShadowsocksServerUserKey>>,
+        salt_checker: Option<Arc<Mutex<dyn SaltChecker>>>,
+    ) -> Self {
         let max_payload_len = stream_type.max_payload_len();
         let max_packet_len = max_payload_len + METADATA_SIZE;
 
@@ -110,9 +139,7 @@ impl ShadowsocksStream {
         let mut encrypt_iv = allocate_vec(salt_len).into_boxed_slice();
         generate_iv(&mut encrypt_iv);
 
-        let session_key = key.create_session_key(&encrypt_iv);
-        let unbound_key = UnboundKey::new(algorithm, &session_key).unwrap();
-        let sealing_key = SealingKey::new(unbound_key, IncreasingSequence::new());
+        let sealing_key = Self::create_sealing_key(algorithm, &key, &encrypt_iv);
 
         Self {
             stream,
@@ -121,6 +148,8 @@ impl ShadowsocksStream {
             algorithm,
             salt_len,
             key,
+            dynamic_user_keys,
+            authenticated_user: None,
             salt_checker,
             encrypt_iv,
             // Needed for AEAD2022 server response.
@@ -147,13 +176,140 @@ impl ShadowsocksStream {
         }
     }
 
+    pub fn authenticated_user(&self) -> Option<AuthenticatedUser> {
+        self.authenticated_user.clone()
+    }
+
+    fn create_sealing_key(
+        algorithm: &'static Algorithm,
+        key: &Arc<Box<dyn ShadowsocksKey>>,
+        encrypt_iv: &[u8],
+    ) -> SealingKey<IncreasingSequence> {
+        let session_key = key.create_session_key(encrypt_iv);
+        let unbound_key = UnboundKey::new(algorithm, &session_key).unwrap();
+        SealingKey::new(unbound_key, IncreasingSequence::new())
+    }
+
+    fn create_opening_key(
+        &self,
+        key: &Arc<Box<dyn ShadowsocksKey>>,
+        decrypt_iv: &[u8],
+    ) -> std::io::Result<OpeningKey<IncreasingSequence>> {
+        let session_key = key.create_session_key(decrypt_iv);
+        let unbound_key = UnboundKey::new(self.algorithm, &session_key).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "failed to create Shadowsocks opening key",
+            )
+        })?;
+        Ok(OpeningKey::new(unbound_key, IncreasingSequence::new()))
+    }
+
+    fn select_dynamic_key(&mut self, user_key: ShadowsocksServerUserKey) {
+        self.key = user_key.key;
+        self.authenticated_user = Some(user_key.authenticated_user);
+        self.sealing_key = Self::create_sealing_key(self.algorithm, &self.key, &self.encrypt_iv);
+    }
+
+    fn has_dynamic_user_keys(&self) -> bool {
+        self.dynamic_user_keys
+            .as_ref()
+            .is_some_and(|keys| !keys.is_empty())
+    }
+
     fn process_opening_key(&mut self) -> std::io::Result<()> {
         let decrypt_iv = &self.unprocessed_buf[0..self.salt_len];
-        let session_key = self.key.create_session_key(decrypt_iv);
-        let unbound_key = UnboundKey::new(self.algorithm, &session_key).unwrap();
-        let opening_key = OpeningKey::new(unbound_key, IncreasingSequence::new());
-        self.opening_key = Some(opening_key);
+        self.opening_key = Some(self.create_opening_key(&self.key, decrypt_iv)?);
         Ok(())
+    }
+
+    fn process_dynamic_aead_read_header(&mut self) -> std::io::Result<()> {
+        let data_length_len = 2 + TAG_LEN;
+        let decrypt_iv = self.unprocessed_buf[0..self.salt_len].to_vec();
+        let encrypted_length =
+            self.unprocessed_buf[self.salt_len..self.salt_len + data_length_len].to_vec();
+        let candidates = self.dynamic_user_keys.clone().unwrap_or_default();
+
+        for candidate in candidates {
+            let mut opening_key = self.create_opening_key(&candidate.key, &decrypt_iv)?;
+            let mut decrypted_length = encrypted_length.clone();
+            if opening_key
+                .open_in_place(Aad::empty(), &mut decrypted_length)
+                .is_err()
+            {
+                continue;
+            }
+
+            let data_len_no_tag: usize =
+                ((decrypted_length[0] as usize) << 8) | (decrypted_length[1] as usize);
+            if data_len_no_tag > self.stream_type.max_payload_len() {
+                continue;
+            }
+
+            self.unprocessed_buf[self.salt_len..self.salt_len + 2]
+                .copy_from_slice(&decrypted_length[0..2]);
+            self.unprocessed_start_offset = self.salt_len + data_length_len;
+            self.unprocessed_pending_len = Some(data_len_no_tag);
+            self.opening_key = Some(opening_key);
+            self.select_dynamic_key(candidate);
+            return Ok(());
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Shadowsocks dynamic user authentication failed",
+        ))
+    }
+
+    fn process_dynamic_aead2022_server_header(&mut self) -> std::io::Result<()> {
+        let fixed_header_len = 11 + TAG_LEN;
+        let decrypt_iv = self.unprocessed_buf[0..self.salt_len].to_vec();
+        let encrypted_header =
+            self.unprocessed_buf[self.salt_len..self.salt_len + fixed_header_len].to_vec();
+        let candidates = self.dynamic_user_keys.clone().unwrap_or_default();
+
+        for candidate in candidates {
+            let mut opening_key = self.create_opening_key(&candidate.key, &decrypt_iv)?;
+            let mut decrypted_header = encrypted_header.clone();
+            if opening_key
+                .open_in_place(Aad::empty(), &mut decrypted_header)
+                .is_err()
+            {
+                continue;
+            }
+
+            if decrypted_header[0] != 0 {
+                continue;
+            }
+
+            let timestamp_secs = u64::from_be_bytes(decrypted_header[1..9].try_into().unwrap());
+            if !is_valid_aead2022_timestamp(timestamp_secs) {
+                continue;
+            }
+
+            self.unprocessed_buf[self.salt_len..self.salt_len + 11]
+                .copy_from_slice(&decrypted_header[0..11]);
+
+            if let Some(salt_checker) = &self.salt_checker
+                && !salt_checker.lock().insert_and_check(&decrypt_iv)
+            {
+                return Err(std::io::Error::other("got duplicate salt"));
+            }
+
+            self.decrypt_iv = Some(decrypt_iv.into_boxed_slice());
+            let variable_header_len = ((self.unprocessed_buf[self.salt_len + 9] as usize) << 8)
+                | (self.unprocessed_buf[self.salt_len + 10] as usize);
+            self.unprocessed_pending_len = Some(variable_header_len);
+            self.unprocessed_start_offset += self.salt_len + 11 + TAG_LEN;
+            self.opening_key = Some(opening_key);
+            self.select_dynamic_key(candidate);
+            return Ok(());
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Shadowsocks AEAD2022 dynamic user authentication failed",
+        ))
     }
 
     fn try_decrypt(&mut self) -> std::io::Result<DecryptState> {
@@ -383,6 +539,9 @@ impl ShadowsocksStream {
 
     fn read_header_len(&self) -> usize {
         match self.stream_type {
+            ShadowsocksStreamType::Aead if self.has_dynamic_user_keys() => {
+                self.salt_len + 2 + TAG_LEN
+            }
             ShadowsocksStreamType::Aead => self.salt_len,
             ShadowsocksStreamType::AEAD2022Server => {
                 // Expect the encrypted client (request) header
@@ -406,10 +565,19 @@ impl ShadowsocksStream {
                         return Err(std::io::Error::other("got duplicate salt"));
                     }
                 }
-                self.process_opening_key()?;
-                self.unprocessed_start_offset += self.salt_len;
+                if self.has_dynamic_user_keys() {
+                    self.process_dynamic_aead_read_header()?;
+                } else {
+                    self.process_opening_key()?;
+                    self.unprocessed_start_offset += self.salt_len;
+                }
             }
             ShadowsocksStreamType::AEAD2022Server => {
+                if self.has_dynamic_user_keys() {
+                    self.process_dynamic_aead2022_server_header()?;
+                    return Ok(());
+                }
+
                 self.process_opening_key()?;
 
                 if self
@@ -441,21 +609,11 @@ impl ShadowsocksStream {
 
                 let timestamp_bytes = &self.unprocessed_buf[self.salt_len + 1..self.salt_len + 9];
                 let timestamp_secs = u64::from_be_bytes(timestamp_bytes.try_into().unwrap());
-                let current_time_secs = current_time_secs();
-                if current_time_secs >= timestamp_secs {
-                    if current_time_secs - timestamp_secs > 30 {
-                        return Err(std::io::Error::other(
-                            "timestamp is greater than 30 seconds",
-                        ));
-                    }
-                } else {
-                    // Make sure times aren't too far in the future.
-                    if timestamp_secs - current_time_secs > 2 {
-                        return Err(std::io::Error::other(format!(
-                            "timestamp is {} seconds in the future",
-                            timestamp_secs - current_time_secs
-                        )));
-                    }
+                if !is_valid_aead2022_timestamp(timestamp_secs) {
+                    let current_time_secs = current_time_secs();
+                    return Err(std::io::Error::other(format!(
+                        "invalid timestamp delta: current={current_time_secs}, got={timestamp_secs}"
+                    )));
                 }
 
                 let decrypt_iv = &self.unprocessed_buf[0..self.salt_len];
@@ -911,4 +1069,13 @@ impl AsyncMessageStream for ShadowsocksStream {}
 #[inline]
 fn current_time_secs() -> u64 {
     SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs()
+}
+
+fn is_valid_aead2022_timestamp(timestamp_secs: u64) -> bool {
+    let current_time_secs = current_time_secs();
+    if current_time_secs >= timestamp_secs {
+        current_time_secs - timestamp_secs <= 30
+    } else {
+        timestamp_secs - current_time_secs <= 2
+    }
 }

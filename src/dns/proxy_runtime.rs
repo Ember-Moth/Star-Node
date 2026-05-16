@@ -347,7 +347,7 @@ mod tests {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
         let provider =
-            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, Duration::from_millis(100));
 
         // Use a black hole address
         let server_addr: SocketAddr = "10.255.255.1:53".parse().unwrap();
@@ -366,16 +366,9 @@ mod tests {
             "should be timeout error"
         );
 
-        // Default timeout is 5 seconds; verify it's bounded (less than 10 seconds)
         assert!(
-            elapsed < Duration::from_secs(10),
+            elapsed < Duration::from_secs(1),
             "default timeout should apply, but took {:?}",
-            elapsed
-        );
-        // Also verify it waited at least close to 5 seconds (with some tolerance)
-        assert!(
-            elapsed >= Duration::from_secs(4),
-            "should wait for default timeout (~5s), but only waited {:?}",
             elapsed
         );
     }

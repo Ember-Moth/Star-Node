@@ -113,6 +113,7 @@ pub fn create_tcp_server_handler(
                     udp_enabled,
                     client_proxy_selector.clone(),
                     resolver.clone(),
+                    runtime.clone(),
                 ))
             }
             ShadowsocksConfig::Aead2022 { cipher, key_bytes } => {
@@ -122,6 +123,7 @@ pub fn create_tcp_server_handler(
                     udp_enabled,
                     client_proxy_selector.clone(),
                     resolver.clone(),
+                    runtime.clone(),
                 ))
             }
         },
